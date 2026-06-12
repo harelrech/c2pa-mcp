@@ -92,6 +92,8 @@ npm test          # builds, then runs unit + end-to-end tests (network needed fo
 
 ## License
 
-Dual-licensed under [MIT](./LICENSE-MIT) or [Apache-2.0](./LICENSE-APACHE), at your option.
+Source code is dual-licensed under [MIT](./LICENSE-MIT) or [Apache-2.0](./LICENSE-APACHE), at your option.
+
+The test images under [`test/fixtures/`](./test/fixtures/) are redistributed unmodified from [`c2pa-org/public-testfiles`](https://github.com/c2pa-org/public-testfiles) and are licensed separately under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).
 
 > Note: if you publish under an unscoped name instead of `@c2paviewer/c2pa-mcp`, change `name` in `package.json` and the `args` in the install block above; nothing else depends on the package name.

@@ -14,3 +14,11 @@ set (the `adobe-20220124-*` series), renamed by the behavior they exercise:
 They are signed with C2PA test certificates that are intentionally not on the
 production trust list, so a fully valid file reports `valid_untrusted` rather than
 `trusted`.
+
+## License
+
+These fixture images are redistributed **unmodified** (renamed only) from
+[`c2pa-org/public-testfiles`](https://github.com/c2pa-org/public-testfiles) and are
+licensed under [Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)](https://creativecommons.org/licenses/by-sa/4.0/).
+This license applies to the image files in this directory only; all source code in
+this repository is licensed under MIT OR Apache-2.0 (see the repository root).
