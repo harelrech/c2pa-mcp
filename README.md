@@ -8,20 +8,6 @@ Built by [c2paviewer.com](https://c2paviewer.com). Verification runs locally on 
 
 > **Read-only.** This server verifies and inspects Content Credentials. It does not sign or create them.
 
-## Why this one
-
-The C2PA standard already has an official, low-level MCP server ([`contentauth/c2pa-mcp`](https://github.com/contentauth/c2pa-mcp), Rust, returns raw manifest JSON). This project is a different tool for a different need:
-
-| | this project | the official `contentauth/c2pa-mcp` |
-|---|---|---|
-| Install | **`npx`, zero install** | `.mcpb` bundle / cargo build (needs Rust) |
-| Output | **digested verdict + plain-English explanations** | raw manifest JSON |
-| AI-generation detection | **yes** | no |
-| Provenance lineage, edits, watermarks | **yes** | no |
-| Trust list | yes (live, conformance) | yes (conformance + ITL) |
-
-If you want raw manifest data straight from the canonical engine, use the official one. If you want an agent to get a **clear verdict it can reason over and cite**, with no toolchain to install, use this one.
-
 ## Install
 
 No global install needed. Add it to your MCP client config and it runs via `npx`:
@@ -58,7 +44,7 @@ Each verify tool returns a human-readable summary plus a structured digest:
 {
   "verdict": "invalid",            // trusted | valid_untrusted | valid_trust_unknown | invalid | no_credentials
   "summary": "Content Credentials are INVALID: an integrity or signature check failed ...",
-  "signer": { "name": "Truepic", "trusted": true },
+  "signer": { "name": "Example Signer", "trusted": false },
   "aiGenerated": { "isAI": true, "tools": ["DALL-E"], "digitalSourceTypes": ["...trainedAlgorithmicMedia"] },
   "provenance": [ { "depth": 0, "title": "This file", "relationship": "This file", "verdict": "invalid" } ],
   "edits": [ { "label": "Created", "agent": "Photoshop", "when": "...", "detail": "" } ],
