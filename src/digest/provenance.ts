@@ -12,6 +12,10 @@ import type { NodeVerdict, ProvenanceEntry } from '../types.js';
 // which is a DoS vector via deeply nested chains. Cap recursion defensively.
 const MAX_INGREDIENT_DEPTH = 20;
 
+// Depth alone doesn't bound the tree: ingredients fan out per level. Cap the
+// total number of lineage nodes the walk will emit.
+const MAX_PROVENANCE_NODES = 500;
+
 /** Signer display name: common name, else the Organization (O=) from the issuer DN. */
 export function signerNameOf(manifest: Manifest | undefined | null): string | null {
   const si = manifest?.signature_info as SignatureInfo | undefined | null;
@@ -83,6 +87,9 @@ export function buildProvenance(
     nodeVerdict: NodeVerdict,
     depth: number,
   ) => {
+    // Depth is capped, but breadth is not: a crafted file can fan out many
+    // ingredients per level. Cap total nodes so the digest can't be ballooned.
+    if (out.length >= MAX_PROVENANCE_NODES) return;
     out.push({
       depth,
       title:

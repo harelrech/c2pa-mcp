@@ -56,8 +56,19 @@ function isPrivateIpv6(host: string): boolean {
   if (h === '::1' || h === '::') return true; // loopback / unspecified
   if (/^f[cd][0-9a-f]{0,2}:/.test(h) || h === 'fc00' || h === 'fd00') return true; // unique-local fc00::/7
   if (/^fe[89ab][0-9a-f]?:/.test(h)) return true; // link-local fe80::/10
-  const v4 = /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(h); // IPv4-mapped
+  // IPv4-mapped in dotted form, e.g. ::ffff:127.0.0.1
+  const v4 = /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(h);
   if (v4 && isPrivateIpv4(v4[1])) return true;
+  // IPv4-mapped in hex form, e.g. ::ffff:7f00:1 — the WHATWG URL parser
+  // canonicalizes ::ffff:127.0.0.1 to this, so the dotted check above never sees
+  // it. Map the trailing two hextets back to dotted decimal and re-check.
+  const mapped = /::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(h);
+  if (mapped) {
+    const hi = parseInt(mapped[1], 16);
+    const lo = parseInt(mapped[2], 16);
+    const dotted = `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+    if (isPrivateIpv4(dotted)) return true;
+  }
   return false;
 }
 
@@ -134,42 +145,53 @@ export async function fetchRemoteAsset(rawUrl: string): Promise<FetchAssetResult
   let url = current.url;
   for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
     const ctrl = new AbortController();
+    // One timeout budget covers the whole hop INCLUDING the body read, so a slow-
+    // drip server that trickles bytes is aborted rather than held open against the
+    // size cap. The timer is cleared in `finally` once the hop fully resolves.
     const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
-    let res: Response;
     try {
-      res = await fetch(url, {
-        signal: ctrl.signal,
-        redirect: 'manual', // we re-validate each hop ourselves
-        headers: { accept: 'image/*,video/*,audio/*,application/pdf', 'user-agent': 'c2pa-mcp' },
-      });
-    } catch (err) {
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          signal: ctrl.signal,
+          redirect: 'manual', // we re-validate each hop ourselves
+          headers: { accept: 'image/*,video/*,audio/*,application/pdf', 'user-agent': 'c2pa-mcp' },
+        });
+      } catch (err) {
+        return { ok: false, code: FetchErrorCode.FetchFailed, detail: (err as Error).message };
+      }
+
+      // Manual redirect: re-validate the Location before following.
+      if (res.status >= 300 && res.status < 400) {
+        const location = res.headers.get('location');
+        if (!location) return { ok: false, code: FetchErrorCode.UpstreamError, detail: 'redirect without location' };
+        if (hop === MAX_REDIRECT_HOPS) return { ok: false, code: FetchErrorCode.TooManyRedirects };
+        const next = validateUrl(new URL(location, url).toString());
+        if (!next.ok) return { ok: false, code: next.code };
+        url = next.url;
+        continue;
+      }
+
+      if (!res.ok) return { ok: false, code: FetchErrorCode.UpstreamError, detail: `HTTP ${res.status}` };
+
+      const contentType = res.headers.get('content-type');
+      if (!isAllowedContentType(contentType)) {
+        return { ok: false, code: FetchErrorCode.UnsupportedContentType, detail: contentType || 'none' };
+      }
+
+      let buffer: Buffer | null;
+      try {
+        buffer = await readCapped(res);
+      } catch (err) {
+        // Abort (timeout) or stream error during the body read.
+        return { ok: false, code: FetchErrorCode.FetchFailed, detail: `body read failed: ${(err as Error).message}` };
+      }
+      if (!buffer) return { ok: false, code: FetchErrorCode.TooLarge };
+
+      return { ok: true, buffer, mimeType: (contentType as string).split(';')[0].trim(), finalUrl: url.toString() };
+    } finally {
       clearTimeout(timer);
-      return { ok: false, code: FetchErrorCode.FetchFailed, detail: (err as Error).message };
     }
-    clearTimeout(timer);
-
-    // Manual redirect: re-validate the Location before following.
-    if (res.status >= 300 && res.status < 400) {
-      const location = res.headers.get('location');
-      if (!location) return { ok: false, code: FetchErrorCode.UpstreamError, detail: 'redirect without location' };
-      if (hop === MAX_REDIRECT_HOPS) return { ok: false, code: FetchErrorCode.TooManyRedirects };
-      const next = validateUrl(new URL(location, url).toString());
-      if (!next.ok) return { ok: false, code: next.code };
-      url = next.url;
-      continue;
-    }
-
-    if (!res.ok) return { ok: false, code: FetchErrorCode.UpstreamError, detail: `HTTP ${res.status}` };
-
-    const contentType = res.headers.get('content-type');
-    if (!isAllowedContentType(contentType)) {
-      return { ok: false, code: FetchErrorCode.UnsupportedContentType, detail: contentType || 'none' };
-    }
-
-    const buffer = await readCapped(res);
-    if (!buffer) return { ok: false, code: FetchErrorCode.TooLarge };
-
-    return { ok: true, buffer, mimeType: (contentType as string).split(';')[0].trim(), finalUrl: url.toString() };
   }
 
   return { ok: false, code: FetchErrorCode.TooManyRedirects };

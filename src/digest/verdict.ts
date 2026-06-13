@@ -62,14 +62,9 @@ export function collectIssues(store: ManifestStore): IssueEntry[] {
   return out;
 }
 
-function hasUntrustedCode(store: ManifestStore): boolean {
-  return allStatuses(store).some((s) => String(s.code).includes('untrusted'));
-}
-
 /**
  * Derive the single root verdict. `validation_state` is authoritative; when it
- * is absent we fall back to scanning status codes so we never silently pass a
- * tampered file.
+ * is absent we fall back conservatively so we never silently pass a tampered file.
  */
 export function deriveVerdict(store: ManifestStore, trustEvaluated: boolean): Verdict {
   const state = store.validation_state;
@@ -78,7 +73,13 @@ export function deriveVerdict(store: ManifestStore, trustEvaluated: boolean): Ve
   if (state === 'Trusted') return 'trusted';
   if (state === 'Valid') return trustEvaluated ? 'valid_untrusted' : 'valid_trust_unknown';
 
-  // No authoritative state: infer from codes.
+  // No authoritative state (older engine / edge case): fail safe. Trust the
+  // engine's OWN failure bucket first — if it placed anything there, the asset is
+  // invalid regardless of how our code table happens to classify the code (a new
+  // engine code we don't know yet must not be downgraded to a warning and slip
+  // through). Then fall back to our own error classification.
+  const failures = store.validation_results?.activeManifest?.failure;
+  if (Array.isArray(failures) && failures.length > 0) return 'invalid';
   const issues = collectIssues(store);
   if (issues.some((i) => i.severity === 'error')) return 'invalid';
   return trustEvaluated ? 'valid_untrusted' : 'valid_trust_unknown';

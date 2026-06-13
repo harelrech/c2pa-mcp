@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTrustSettings, createVerifySettings, mergeSettings, settingsToJson } from '@contentauth/c2pa-node';
 import type { TrustInfo } from '../types.js';
+import { validateUrl } from '../net/safeFetch.js';
 
 // The official C2PA Conformance Program trust list. Comma-separate the env var to
 // add more PEM sources (e.g. the Interim Trust List for pre-2026 content).
@@ -73,18 +74,37 @@ function isFresh(fetchedAtMs: number): boolean {
   return nowMs() - fetchedAtMs < TTL_SECONDS * 1000;
 }
 
-async function fetchPem(url: string): Promise<string> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, { signal: ctrl.signal, redirect: 'follow' });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const text = await res.text();
-    if (!text.includes('BEGIN CERTIFICATE')) throw new Error('response is not PEM');
-    return text;
-  } finally {
-    clearTimeout(timer);
+async function fetchPem(rawUrl: string): Promise<string> {
+  // The trust-list URL is operator-supplied (env var). Apply the same SSRF
+  // discipline as the URL tool: https + public host only, and re-validate every
+  // redirect hop, so a misconfigured or hostile URL can't be bounced to an
+  // internal/metadata endpoint and have its response trusted as anchors.
+  let v = validateUrl(rawUrl);
+  if (!v.ok) throw new Error(`unsafe trust-list URL (${v.code})`);
+  let url = v.url;
+
+  for (let hop = 0; hop <= 3; hop++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, { signal: ctrl.signal, redirect: 'manual' });
+      if (res.status >= 300 && res.status < 400) {
+        const location = res.headers.get('location');
+        if (!location || hop === 3) throw new Error('too many redirects');
+        const next = validateUrl(new URL(location, url).toString());
+        if (!next.ok) throw new Error(`unsafe redirect (${next.code})`);
+        url = next.url;
+        continue;
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      if (!text.includes('BEGIN CERTIFICATE')) throw new Error('response is not PEM');
+      return text;
+    } finally {
+      clearTimeout(timer);
+    }
   }
+  throw new Error('too many redirects');
 }
 
 /** Fetch all configured trust-list URLs and concatenate the successful ones. */

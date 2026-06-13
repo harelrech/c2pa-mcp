@@ -36,6 +36,10 @@ test('rejects private, loopback, and metadata hosts', () => {
     '[::1]',
     '[fc00::1]',
     '[fe80::1]',
+    '[::ffff:127.0.0.1]', // IPv4-mapped, dotted form
+    '[::ffff:7f00:1]', // IPv4-mapped, hex form (how the URL parser normalizes 127.0.0.1)
+    '[::ffff:10.0.0.1]', // IPv4-mapped private
+    '[::ffff:a9fe:a9fe]', // IPv4-mapped 169.254.169.254 metadata, hex form
   ]) {
     const r = validateUrl(`https://${host}/file.jpg`);
     assert.equal(r.ok, false, `${host} should be rejected`);

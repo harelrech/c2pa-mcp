@@ -101,14 +101,23 @@ export async function scanDirectoryTool(args: { directory: string; maxFiles?: nu
   });
   const dropped = Math.max(0, candidates.length - cap);
   const toScan = candidates.slice(0, cap);
+  const maxBytes = Number(process.env.C2PA_MAX_SCAN_FILE_BYTES || 500 * 1024 * 1024);
 
   const results: ScanEntry[] = [];
+  let tooLarge = 0;
   for (const name of toScan) {
     const path = join(dir, name);
+    let info;
     try {
-      const info = await stat(path);
-      if (!info.isFile()) continue;
+      info = await stat(path);
     } catch {
+      continue;
+    }
+    if (!info.isFile()) continue;
+    // Skip very large files: verifying hands the path to the native engine, and a
+    // directory of huge videos would otherwise hang the whole scan.
+    if (info.size > maxBytes) {
+      tooLarge++;
       continue;
     }
     const digest = await verifyAsset({ path, mimeType: mimeFromPath(path) ?? undefined });
@@ -129,16 +138,20 @@ export async function scanDirectoryTool(args: { directory: string; maxFiles?: nu
     (r) =>
       `  ${r.verdict.padEnd(20)} ${r.aiGenerated ? 'AI ' : '   '} ${r.signer ? `[${r.signer}] ` : ''}${r.path}`,
   );
+  const skipNotes = [
+    dropped ? `${dropped} past the ${cap}-file cap` : '',
+    tooLarge ? `${tooLarge} over the size limit` : '',
+  ].filter(Boolean);
   const summary =
     `Scanned ${results.length} media file(s) in ${dir}` +
-    (dropped ? ` (${dropped} more skipped past the ${cap}-file cap)` : '') +
+    (skipNotes.length ? ` (skipped: ${skipNotes.join(', ')})` : '') +
     `:\n  with Content Credentials: ${withCreds}\n  AI-declared: ${aiCount}\n  invalid: ${invalid}\n` +
     tableLines.join('\n');
 
   return ok(summary, {
     directory: dir,
     scanned: results.length,
-    skipped: dropped,
+    skipped: { pastCap: dropped, tooLarge },
     totals: { withCredentials: withCreds, aiDeclared: aiCount, invalid },
     files: results,
   });
