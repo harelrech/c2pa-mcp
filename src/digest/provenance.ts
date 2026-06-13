@@ -79,6 +79,10 @@ export function buildProvenance(
 
   const out: ProvenanceEntry[] = [];
   const visited = new Set<string>();
+  // Manifest labels already on the walked path, so an A->B->A manifest cycle is
+  // rendered once as a leaf instead of fanning out to the depth cap.
+  const visitedManifests = new Set<string>();
+  if (activeLabel) visitedManifests.add(activeLabel);
 
   const walk = (
     manifest: Manifest,
@@ -111,15 +115,26 @@ export function buildProvenance(
       if (idKey) visited.add(idKey);
 
       const childRel = relationshipLabel(ing?.relationship);
-      const childManifest =
-        (ing?.active_manifest && manifests[ing.active_manifest]) || undefined;
+      const childLabel = ing?.active_manifest || undefined;
+      const childManifest = (childLabel && manifests[childLabel]) || undefined;
 
-      if (childManifest) {
+      if (childManifest && childLabel && !visitedManifests.has(childLabel)) {
+        visitedManifests.add(childLabel);
         const childVerdict = verdictFromStatus(
           ing?.validation_status,
           childManifest.signature_info ? 'valid' : 'unknown',
         );
         walk(childManifest, childRel, ing, childVerdict, depth + 1);
+      } else if (childManifest) {
+        // Already-walked manifest (cycle): show it as a leaf, don't recurse.
+        out.push({
+          depth: depth + 1,
+          title: ing?.title || childManifest.title || 'Ingredient',
+          relationship: childRel,
+          signer: signerNameOf(childManifest),
+          format: ing?.format || childManifest.format || null,
+          verdict: verdictFromStatus(ing?.validation_status, 'unknown'),
+        });
       } else {
         // Ingredient with no resolvable manifest: still show it as a leaf so the
         // lineage stays complete.

@@ -9,12 +9,12 @@
 //    verification still runs but the digest reports trust was not evaluated.
 //    We never silently fall back to a stale snapshot.
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createTrustSettings, createVerifySettings, mergeSettings, settingsToJson } from '@contentauth/c2pa-node';
 import type { TrustInfo } from '../types.js';
-import { validateUrl } from '../net/safeFetch.js';
+import { validateUrl, ssrfDispatcher } from '../net/safeFetch.js';
 
 // The official C2PA Conformance Program trust list. Comma-separate the env var to
 // add more PEM sources (e.g. the Interim Trust List for pre-2026 content).
@@ -32,7 +32,11 @@ const URLS = TRUST_LIST_URLS.length > 0 ? TRUST_LIST_URLS : DEFAULT_TRUST_LIST_U
 const TTL_SECONDS = Number(process.env.C2PA_TRUST_TTL_SECONDS || 24 * 60 * 60);
 const FETCH_TIMEOUT_MS = Number(process.env.C2PA_TRUST_FETCH_TIMEOUT_MS || 15000);
 
-const CACHE_DIR = join(tmpdir(), 'c2pa-mcp-cache');
+// A per-USER cache dir, not shared /tmp. The trust list defines who is "trusted",
+// so a world-writable cache an attacker could pre-seed would let them flip assets
+// to `trusted`. Under the user's home, plus 0700 perms and an ownership check on
+// read, the cache cannot be planted by another local user.
+const CACHE_DIR = join(process.env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'c2pa-mcp');
 const CACHE_FILE = join(CACHE_DIR, 'trust-anchors.pem');
 const CACHE_META = join(CACHE_DIR, 'trust-anchors.meta.json');
 
@@ -51,9 +55,19 @@ function nowMs(): number {
 
 async function readDiskCache(): Promise<{ pem: string; fetchedAtMs: number } | null> {
   try {
+    // On POSIX, refuse a cache file we don't own or that others can write — it
+    // could have been planted to inject a rogue trust anchor.
+    if (process.platform !== 'win32' && typeof process.getuid === 'function') {
+      const st = await stat(CACHE_FILE);
+      if (st.uid !== process.getuid()) return null;
+      if ((st.mode & 0o022) !== 0) return null; // group/other writable
+    }
     const [pem, metaRaw] = await Promise.all([readFile(CACHE_FILE, 'utf8'), readFile(CACHE_META, 'utf8')]);
-    const meta = JSON.parse(metaRaw) as { fetchedAtMs?: number };
+    const meta = JSON.parse(metaRaw) as { fetchedAtMs?: number; urls?: string[] };
     if (!pem.trim() || typeof meta.fetchedAtMs !== 'number') return null;
+    // Bind the cache to the exact configured URL set: a cache built for a
+    // different trust-list config must not be reused.
+    if (!Array.isArray(meta.urls) || meta.urls.join('\n') !== URLS.join('\n')) return null;
     return { pem, fetchedAtMs: meta.fetchedAtMs };
   } catch {
     return null;
@@ -62,11 +76,11 @@ async function readDiskCache(): Promise<{ pem: string; fetchedAtMs: number } | n
 
 async function writeDiskCache(pem: string, fetchedAtMs: number): Promise<void> {
   try {
-    await mkdir(CACHE_DIR, { recursive: true });
-    await writeFile(CACHE_FILE, pem, 'utf8');
-    await writeFile(CACHE_META, JSON.stringify({ fetchedAtMs, urls: URLS }), 'utf8');
+    await mkdir(CACHE_DIR, { recursive: true, mode: 0o700 });
+    await writeFile(CACHE_FILE, pem, { encoding: 'utf8', mode: 0o600 });
+    await writeFile(CACHE_META, JSON.stringify({ fetchedAtMs, urls: URLS }), { encoding: 'utf8', mode: 0o600 });
   } catch {
-    // A non-writable temp dir is non-fatal; we just lose cross-process caching.
+    // A non-writable cache dir is non-fatal; we just lose cross-process caching.
   }
 }
 
@@ -87,7 +101,11 @@ async function fetchPem(rawUrl: string): Promise<string> {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
     try {
-      const res = await fetch(url, { signal: ctrl.signal, redirect: 'manual' });
+      const res = await fetch(url, {
+        signal: ctrl.signal,
+        redirect: 'manual',
+        dispatcher: ssrfDispatcher,
+      } as RequestInit & { dispatcher: unknown });
       if (res.status >= 300 && res.status < 400) {
         const location = res.headers.get('location');
         if (!location || hop === 3) throw new Error('too many redirects');

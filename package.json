@@ -37,6 +37,7 @@
     "@contentauth/c2pa-node": "^0.5.5",
     "@contentauth/c2pa-types": "^0.6.0",
     "@modelcontextprotocol/sdk": "^1.12.0",
+    "undici": "^6.26.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

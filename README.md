@@ -70,11 +70,15 @@ Environment overrides:
 | `C2PA_TRUST_LIST_URL` | conformance list | Comma-separated PEM URLs. Add the Interim Trust List (ITL) here to verify pre-2026 content. |
 | `C2PA_TRUST_TTL_SECONDS` | `86400` | Cache lifetime for the fetched trust list. |
 | `C2PA_MAX_FETCH_BYTES` | `104857600` | Max download size for `verify_c2pa_url` (100 MB). |
+| `C2PA_MAX_FILE_BYTES` | `524288000` | Max size of a local file the file/scan tools will verify (500 MB). |
+| `C2PA_ALLOWED_ROOTS` | (unset) | Comma/semicolon-separated absolute paths. When set, `verify_c2pa_file` and `scan_c2pa_directory` refuse any path outside these roots. |
 
 ## Security
 
 - **Local processing.** Files are read and verified on your machine; nothing is uploaded.
-- **SSRF-guarded URL fetching.** `verify_c2pa_url` accepts only public `https` URLs, refuses private/loopback/link-local/cloud-metadata hosts, re-validates every redirect hop, sends no cookies or auth, enforces a content-type allowlist (image/video/audio/PDF) and a size cap.
+- **SSRF-guarded URL fetching.** `verify_c2pa_url` accepts only public `https` URLs and refuses private/loopback/link-local/cloud-metadata hosts. It resolves DNS itself and **pins the validated IP** (so a public name that resolves to a private address, e.g. via a rebinding service, is blocked at connect time), re-validates every redirect hop, sends no cookies or auth, and enforces a content-type allowlist (image/video/audio/PDF) plus a size cap.
+- **Local path safety.** The file/scan tools refuse remote `file://` authorities and UNC paths (which would egress over SMB), cap file size, and honor `C2PA_ALLOWED_ROOTS`.
+- **These tools expose the host filesystem and network by design.** Because an MCP client may let a model call them with attacker-influenced arguments (prompt injection), set `C2PA_ALLOWED_ROOTS` to confine file access in untrusted contexts, and treat `includeRaw` output as untrusted, verbose manifest data.
 
 ## Limitations
 

@@ -5,6 +5,9 @@
 // public https image/video/audio/pdf, never localhost, cloud metadata, or other
 // private hosts. Ported from c2paviewer.com's URL-inspection proxy.
 
+import { lookup as dnsLookup } from 'node:dns';
+import { Agent } from 'undici';
+
 const MAX_URL_FETCH_BYTES = Number(process.env.C2PA_MAX_FETCH_BYTES || 100 * 1024 * 1024); // 100 MB
 const MAX_REDIRECT_HOPS = 3;
 const FETCH_TIMEOUT_MS = Number(process.env.C2PA_FETCH_TIMEOUT_MS || 30000);
@@ -51,6 +54,13 @@ function isPrivateIpv4(host: string): boolean {
   return false;
 }
 
+/** Turn two IPv6 hextets (hex strings) into a dotted IPv4 string. */
+function hextetsToIpv4(hiHex: string, loHex: string): string {
+  const hi = parseInt(hiHex, 16);
+  const lo = parseInt(loHex, 16);
+  return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+}
+
 function isPrivateIpv6(host: string): boolean {
   const h = host.toLowerCase();
   if (h === '::1' || h === '::') return true; // loopback / unspecified
@@ -60,15 +70,16 @@ function isPrivateIpv6(host: string): boolean {
   const v4 = /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(h);
   if (v4 && isPrivateIpv4(v4[1])) return true;
   // IPv4-mapped in hex form, e.g. ::ffff:7f00:1 — the WHATWG URL parser
-  // canonicalizes ::ffff:127.0.0.1 to this, so the dotted check above never sees
-  // it. Map the trailing two hextets back to dotted decimal and re-check.
+  // canonicalizes ::ffff:127.0.0.1 to this, so the dotted check above never sees it.
   const mapped = /::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(h);
-  if (mapped) {
-    const hi = parseInt(mapped[1], 16);
-    const lo = parseInt(mapped[2], 16);
-    const dotted = `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
-    if (isPrivateIpv4(dotted)) return true;
-  }
+  if (mapped && isPrivateIpv4(hextetsToIpv4(mapped[1], mapped[2]))) return true;
+  // 6to4 (2002::/16) embeds an IPv4 in hextets 2-3, e.g. 2002:7f00:1:: -> 127.0.0.1
+  const sixToFour = /^2002:([0-9a-f]{1,4}):([0-9a-f]{1,4})/i.exec(h);
+  if (sixToFour && isPrivateIpv4(hextetsToIpv4(sixToFour[1], sixToFour[2]))) return true;
+  // NAT64 (64:ff9b::/96) embeds an IPv4 in the last two hextets, e.g.
+  // 64:ff9b::7f00:1 -> 127.0.0.1
+  const nat64 = /^64:ff9b:(?:[0-9a-f]{0,4}:)*?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(h);
+  if (nat64 && isPrivateIpv4(hextetsToIpv4(nat64[1], nat64[2]))) return true;
   return false;
 }
 
@@ -103,6 +114,42 @@ export function isAllowedContentType(contentType: string | null | undefined): bo
   if (!contentType) return false;
   return ALLOWED_CONTENT_TYPE.test(contentType.split(';')[0].trim());
 }
+
+// ── DNS-pinned dispatcher ───────────────────────────────────────────────────
+// validateUrl only inspects the hostname STRING, but fetch() re-resolves DNS at
+// connect time, so a public name that resolves to a private/metadata IP (e.g.
+// 169.254.169.254.nip.io) would slip through. This connection-time lookup
+// resolves the name ourselves, rejects if ANY resolved address is private, and
+// pins the connection to the vetted result — which also closes DNS rebinding,
+// since the same resolution is what the socket uses. Applied on every hop.
+type LookupCallback = (
+  err: NodeJS.ErrnoException | null,
+  address?: string | { address: string; family: number }[],
+  family?: number,
+) => void;
+
+function safeLookup(
+  hostname: string,
+  options: { all?: boolean } & Record<string, unknown>,
+  callback: LookupCallback,
+): void {
+  dnsLookup(hostname, { all: true, verbatim: true }, (err, addresses) => {
+    if (err) return callback(err);
+    for (const a of addresses) {
+      const blocked = a.family === 6 ? isPrivateIpv6(a.address) : isPrivateIpv4(a.address);
+      if (blocked) {
+        const e: NodeJS.ErrnoException = new Error(`blocked private address ${a.address} for ${hostname}`);
+        e.code = 'EAI_BLOCKED';
+        return callback(e);
+      }
+    }
+    if (options && options.all) callback(null, addresses);
+    else callback(null, addresses[0].address, addresses[0].family);
+  });
+}
+
+/** Shared dispatcher that validates and pins every outbound connection's DNS. */
+export const ssrfDispatcher = new Agent({ connect: { lookup: safeLookup as never } });
 
 export type FetchAssetResult =
   | { ok: true; buffer: Buffer; mimeType: string; finalUrl: string }
@@ -155,8 +202,9 @@ export async function fetchRemoteAsset(rawUrl: string): Promise<FetchAssetResult
         res = await fetch(url, {
           signal: ctrl.signal,
           redirect: 'manual', // we re-validate each hop ourselves
+          dispatcher: ssrfDispatcher, // resolve-validate-pin DNS at connect time
           headers: { accept: 'image/*,video/*,audio/*,application/pdf', 'user-agent': 'c2pa-mcp' },
-        });
+        } as RequestInit & { dispatcher: unknown });
       } catch (err) {
         return { ok: false, code: FetchErrorCode.FetchFailed, detail: (err as Error).message };
       }
