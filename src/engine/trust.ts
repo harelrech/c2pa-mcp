@@ -16,10 +16,15 @@ import { createTrustSettings, createVerifySettings, mergeSettings, settingsToJso
 import type { TrustInfo } from '../types.js';
 import { validateUrl, ssrfDispatcher } from '../net/safeFetch.js';
 
-// The official C2PA Conformance Program trust list. Comma-separate the env var to
-// add more PEM sources (e.g. the Interim Trust List for pre-2026 content).
+// Default trust anchors: the official C2PA Conformance Program list (going-forward
+// signers) PLUS the legacy CAI Interim Trust List. The ITL was frozen in Jan 2026,
+// but it is still the only list that recognizes pre-conformance signers — Adobe,
+// Leica, Truepic, Canon, Samsung, and most real-world content in circulation today.
+// Without it, mainstream signed content reads as valid-but-untrusted. Override or
+// extend with the comma-separated C2PA_TRUST_LIST_URL env var.
 const DEFAULT_TRUST_LIST_URLS = [
   'https://raw.githubusercontent.com/c2pa-org/conformance-public/main/trust-list/C2PA-TRUST-LIST.pem',
+  'https://verify.contentauthenticity.org/trust/anchors.pem',
 ];
 
 const TRUST_LIST_URLS: string[] = (process.env.C2PA_TRUST_LIST_URL || '')

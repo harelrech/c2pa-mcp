@@ -59,15 +59,20 @@ Pass `"includeRaw": true` to also get the full raw manifest store.
 
 ## Trust list
 
-To report a signer as **`trusted`** (not just cryptographically valid), the server checks the signing certificate against the official [C2PA Conformance trust list](https://github.com/c2pa-org/conformance-public), **fetched live and cached** (24h TTL) so trust decisions stay current without a release.
+To report a signer as **`trusted`** (not just cryptographically valid), the server checks the signing certificate against two trust lists, **fetched live and cached** (24h TTL) so decisions stay current without a release:
 
-If the trust list can't be fetched, the server **degrades loudly**: verification still runs, but the verdict becomes `valid_trust_unknown` and `trust.evaluated` is `false` with a reason. It never silently treats an unknown signer as trusted, and never silently uses a stale snapshot.
+- the official [C2PA Conformance Program list](https://github.com/c2pa-org/conformance-public) (going-forward signers), and
+- the legacy [CAI Interim Trust List](https://verify.contentauthenticity.org/trust/anchors.pem) (frozen Jan 2026, but still the only list that recognizes pre-conformance signers — Adobe, Leica, Truepic, Canon, Samsung, and most real-world content today).
+
+Both are on by default; without the ITL, mainstream signed content would read as `valid_untrusted`.
+
+If the trust lists can't be fetched, the server **degrades loudly**: verification still runs, but the verdict becomes `valid_trust_unknown` and `trust.evaluated` is `false` with a reason. It never silently treats an unknown signer as trusted, and never silently uses a stale snapshot.
 
 Environment overrides:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `C2PA_TRUST_LIST_URL` | conformance list | Comma-separated PEM URLs. Add the Interim Trust List (ITL) here to verify pre-2026 content. |
+| `C2PA_TRUST_LIST_URL` | conformance + ITL | Comma-separated PEM URLs. Replaces the defaults (conformance list + Interim Trust List). |
 | `C2PA_TRUST_TTL_SECONDS` | `86400` | Cache lifetime for the fetched trust list. |
 | `C2PA_MAX_FETCH_BYTES` | `104857600` | Max download size for `verify_c2pa_url` (100 MB). |
 | `C2PA_MAX_FILE_BYTES` | `524288000` | Max size of a local file the file/scan tools will verify (500 MB). |
