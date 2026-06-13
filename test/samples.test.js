@@ -17,19 +17,19 @@ test('no C2PA data -> no_credentials', async () => {
   assert.equal(d.provenance.length, 0);
 });
 
-test('valid but untrusted signer -> valid_untrusted', async () => {
+test('valid but untrusted signer -> exactly valid_untrusted (or valid_trust_unknown offline)', async () => {
   const d = await verifyAsset({ path: join(FIX, 'valid-untrusted.jpg') });
-  // With the live trust list loaded the test cert is either untrusted or, if it
-  // ever lands on the list, trusted. It must never be invalid.
-  assert.ok(['valid_untrusted', 'trusted', 'valid_trust_unknown'].includes(d.verdict), `got ${d.verdict}`);
-  assert.notEqual(d.verdict, 'invalid');
+  // The fixture's signer is a C2PA test cert, never on the production trust list,
+  // so the outcome is fully determined by whether the trust list could load:
+  // trust evaluated -> valid_untrusted; trust unavailable -> valid_trust_unknown.
+  assert.equal(d.verdict, d.trust.evaluated ? 'valid_untrusted' : 'valid_trust_unknown');
   assert.ok(d.signer, 'a signer should be present');
   assert.ok(d.provenance.length >= 1);
 });
 
 test('deep provenance chain builds multiple lineage nodes', async () => {
   const d = await verifyAsset({ path: join(FIX, 'valid-deep-chain.jpg') });
-  assert.notEqual(d.verdict, 'invalid');
+  assert.equal(d.verdict, d.trust.evaluated ? 'valid_untrusted' : 'valid_trust_unknown');
   assert.ok(d.provenance.length > 2, `expected a multi-node chain, got ${d.provenance.length}`);
   assert.equal(d.provenance[0].depth, 0);
   assert.equal(d.provenance[0].relationship, 'This file');
