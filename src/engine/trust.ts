@@ -36,6 +36,10 @@ const URLS = TRUST_LIST_URLS.length > 0 ? TRUST_LIST_URLS : DEFAULT_TRUST_LIST_U
 
 const TTL_SECONDS = Number(process.env.C2PA_TRUST_TTL_SECONDS || 24 * 60 * 60);
 const FETCH_TIMEOUT_MS = Number(process.env.C2PA_TRUST_FETCH_TIMEOUT_MS || 15000);
+const MAX_TRUST_FETCH_HOPS = 3;
+// A PEM trust bundle is tens of KB; cap the body so a hostile/misconfigured URL
+// can't stream an unbounded response into memory.
+const MAX_TRUST_BYTES = Number(process.env.C2PA_MAX_TRUST_BYTES || 10 * 1024 * 1024);
 
 // A per-USER cache dir, not shared /tmp. The trust list defines who is "trusted",
 // so a world-writable cache an attacker could pre-seed would let them flip assets
@@ -108,7 +112,7 @@ async function fetchPem(rawUrl: string): Promise<string> {
   if (!v.ok) throw new Error(`unsafe trust-list URL (${v.code})`);
   let url = v.url;
 
-  for (let hop = 0; hop <= 3; hop++) {
+  for (let hop = 0; ; hop++) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
     try {
@@ -120,21 +124,25 @@ async function fetchPem(rawUrl: string): Promise<string> {
       if (res.status >= 300 && res.status < 400) {
         await res.body?.cancel().catch(() => {}); // release the connection before the next hop
         const location = res.headers.get('location');
-        if (!location || hop === 3) throw new Error('too many redirects');
+        if (!location || hop >= MAX_TRUST_FETCH_HOPS) throw new Error('too many redirects');
         const next = validateUrl(new URL(location, url).toString());
         if (!next.ok) throw new Error(`unsafe redirect (${next.code})`);
         url = next.url;
         continue;
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (Number(res.headers.get('content-length') || 0) > MAX_TRUST_BYTES) {
+        await res.body?.cancel().catch(() => {});
+        throw new Error('trust list too large');
+      }
       const text = await res.text();
+      if (text.length > MAX_TRUST_BYTES) throw new Error('trust list too large');
       if (!text.includes('BEGIN CERTIFICATE')) throw new Error('response is not PEM');
       return text;
     } finally {
       clearTimeout(timer);
     }
   }
-  throw new Error('too many redirects');
 }
 
 /** Fetch all configured trust-list URLs and concatenate the successful ones. */

@@ -50,14 +50,14 @@ function verdictFromStatus(
 ): NodeVerdict {
   if (!Array.isArray(status) || status.length === 0) return fallback;
   let v: NodeVerdict = fallback;
-  let sawTrusted = false;
   for (const s of status) {
     const code = String(s?.code || '').toLowerCase();
     if (/mismatch|invalid|expired|revoked|malformed|outsidevalidity|\.missing/.test(code)) return 'invalid';
     if (code.includes('untrusted')) v = 'warning';
-    else if (code.includes('trusted')) sawTrusted = true;
   }
-  if (v === fallback && sawTrusted) return 'trusted';
+  // Deliberately never elevate a node to 'trusted' from a status string. Trust is a
+  // store-level decision; the root node carries the authoritative verdict, and a
+  // per-ingredient 'trusted' must not contradict an overall valid_trust_unknown.
   return v;
 }
 
@@ -119,7 +119,11 @@ export function buildProvenance(
 
     const ingredients = Array.isArray(manifest?.ingredients) ? manifest.ingredients : [];
     for (const ing of ingredients) {
-      const idKey = ing?.instance_id || ing?.active_manifest || ing?.title || undefined;
+      // Dedupe genuinely-identical ingredients by their canonical instance_id only.
+      // Manifest cycles are handled by visitedManifests; conflating active_manifest
+      // or title here would wrongly suppress distinct ingredients (e.g. two
+      // "Untitled" components, or two ingredients sharing one manifest reference).
+      const idKey = ing?.instance_id || undefined;
       if (idKey && visited.has(idKey)) continue;
       if (idKey) visited.add(idKey);
 

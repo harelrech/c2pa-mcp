@@ -42,6 +42,10 @@ test('rejects private, loopback, and metadata hosts', () => {
     '[::ffff:a9fe:a9fe]', // IPv4-mapped 169.254.169.254 metadata, hex form
     '[2002:7f00:1::]', // 6to4 embedding 127.0.0.1
     '[64:ff9b::7f00:1]', // NAT64 embedding 127.0.0.1
+    '[fec0::1]', // deprecated site-local
+    '[ff02::1]', // link-local multicast (all nodes)
+    '[ff05::1]', // site-local multicast
+    '[0:0:0:0:0:0:0:1]', // fully-expanded loopback
   ]) {
     const r = validateUrl(`https://${host}/file.jpg`);
     assert.equal(r.ok, false, `${host} should be rejected`);
@@ -61,6 +65,11 @@ test('accepts a normal public https media URL', () => {
   const r = validateUrl('https://example.com/photo.jpg');
   assert.equal(r.ok, true);
   assert.equal(r.url.hostname, 'example.com');
+});
+
+test('accepts a public IPv6 literal (no over-blocking)', () => {
+  assert.equal(validateUrl('https://[2001:4860:4860::8888]/x.jpg').ok, true);
+  assert.equal(isPrivateOrReservedHost('2606:2800:220:1:248:1893:25c8:1946'), false);
 });
 
 test('content-type allowlist', () => {

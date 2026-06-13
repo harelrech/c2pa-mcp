@@ -54,32 +54,62 @@ function isPrivateIpv4(host: string): boolean {
   return false;
 }
 
-/** Turn two IPv6 hextets (hex strings) into a dotted IPv4 string. */
-function hextetsToIpv4(hiHex: string, loHex: string): string {
-  const hi = parseInt(hiHex, 16);
-  const lo = parseInt(loHex, 16);
+/** Expand an IPv6 string into its 8 hextets (numbers), or null if it isn't valid. */
+function expandIpv6(host: string): number[] | null {
+  let h = host.toLowerCase().split('%')[0]; // strip any zone id
+  if (!h.includes(':')) return null;
+  // Fold a trailing embedded IPv4 (e.g. ::ffff:127.0.0.1) into two hextets.
+  const m = /^(.*:)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (m) {
+    const o = [Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5])];
+    if (o.some((x) => x > 255)) return null;
+    h = `${m[1]}${((o[0] << 8) | o[1]).toString(16)}:${((o[2] << 8) | o[3]).toString(16)}`;
+  }
+  const halves = h.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  let groups: string[];
+  if (halves.length === 2) {
+    const fill = 8 - head.length - tail.length;
+    if (fill < 0) return null;
+    groups = [...head, ...Array<string>(fill).fill('0'), ...tail];
+  } else {
+    groups = head;
+  }
+  if (groups.length !== 8) return null;
+  const nums = groups.map((g) => (g === '' ? NaN : parseInt(g, 16)));
+  if (nums.some((n) => !Number.isInteger(n) || n < 0 || n > 0xffff)) return null;
+  return nums;
+}
+
+function pairToIpv4(hi: number, lo: number): string {
   return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
 }
 
+/**
+ * True if an IPv6 literal is private/reserved or embeds a private IPv4. Works on a
+ * numeric expansion so it can't be evaded by compressed/expanded/zero-run forms or
+ * by the position of an embedded v4 address.
+ */
 function isPrivateIpv6(host: string): boolean {
-  const h = host.toLowerCase();
-  if (h === '::1' || h === '::') return true; // loopback / unspecified
-  if (/^f[cd][0-9a-f]{0,2}:/.test(h) || h === 'fc00' || h === 'fd00') return true; // unique-local fc00::/7
-  if (/^fe[89ab][0-9a-f]?:/.test(h)) return true; // link-local fe80::/10
-  // IPv4-mapped in dotted form, e.g. ::ffff:127.0.0.1
-  const v4 = /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(h);
-  if (v4 && isPrivateIpv4(v4[1])) return true;
-  // IPv4-mapped in hex form, e.g. ::ffff:7f00:1 — the WHATWG URL parser
-  // canonicalizes ::ffff:127.0.0.1 to this, so the dotted check above never sees it.
-  const mapped = /::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(h);
-  if (mapped && isPrivateIpv4(hextetsToIpv4(mapped[1], mapped[2]))) return true;
-  // 6to4 (2002::/16) embeds an IPv4 in hextets 2-3, e.g. 2002:7f00:1:: -> 127.0.0.1
-  const sixToFour = /^2002:([0-9a-f]{1,4}):([0-9a-f]{1,4})/i.exec(h);
-  if (sixToFour && isPrivateIpv4(hextetsToIpv4(sixToFour[1], sixToFour[2]))) return true;
-  // NAT64 (64:ff9b::/96) embeds an IPv4 in the last two hextets, e.g.
-  // 64:ff9b::7f00:1 -> 127.0.0.1
-  const nat64 = /^64:ff9b:(?:[0-9a-f]{0,4}:)*?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(h);
-  if (nat64 && isPrivateIpv4(hextetsToIpv4(nat64[1], nat64[2]))) return true;
+  const x = expandIpv6(host);
+  if (!x) return false;
+  const top5Zero = x[0] === 0 && x[1] === 0 && x[2] === 0 && x[3] === 0 && x[4] === 0;
+  if (x.every((n) => n === 0)) return true; // :: unspecified
+  if (top5Zero && x[5] === 0 && x[6] === 0 && x[7] === 1) return true; // ::1 loopback
+  if (x[0] >= 0xfc00 && x[0] <= 0xfdff) return true; // ULA fc00::/7
+  if (x[0] >= 0xfe80 && x[0] <= 0xfebf) return true; // link-local fe80::/10
+  if (x[0] >= 0xfec0 && x[0] <= 0xfeff) return true; // site-local fec0::/10 (deprecated)
+  if (x[0] >= 0xff00) return true; // multicast ff00::/8
+  // IPv4-mapped ::ffff:a.b.c.d
+  if (top5Zero && x[5] === 0xffff) return isPrivateIpv4(pairToIpv4(x[6], x[7]));
+  // IPv4-compatible ::a.b.c.d (deprecated), excluding :: and ::1
+  if (top5Zero && x[5] === 0 && (x[6] !== 0 || x[7] > 1)) return isPrivateIpv4(pairToIpv4(x[6], x[7]));
+  // 6to4 2002::/16 embeds the v4 in hextets 1-2
+  if (x[0] === 0x2002) return isPrivateIpv4(pairToIpv4(x[1], x[2]));
+  // NAT64 64:ff9b::/96 embeds the v4 in the last two hextets
+  if (x[0] === 0x0064 && x[1] === 0xff9b) return isPrivateIpv4(pairToIpv4(x[6], x[7]));
   return false;
 }
 
@@ -136,18 +166,9 @@ function safeLookup(
   dnsLookup(hostname, { all: true, verbatim: true }, (err, addresses) => {
     if (err) return callback(err);
     for (const a of addresses) {
-      let addr = a.address;
-      if (a.family === 6) {
-        // Canonicalize raw resolver output (e.g. fully-expanded 0:0:0:0:0:0:0:1)
-        // through the URL parser before matching, so non-canonical forms can't
-        // slip the literal loopback/mapped checks.
-        try {
-          addr = new URL(`http://[${addr}]/`).hostname.replace(/^\[|\]$/g, '');
-        } catch {
-          /* keep the raw address */
-        }
-      }
-      const blocked = a.family === 6 ? isPrivateIpv6(addr) : isPrivateIpv4(addr);
+      // isPrivateIpv6 expands non-canonical forms itself, so raw resolver output
+      // (e.g. a fully-expanded address) is matched correctly.
+      const blocked = a.family === 6 ? isPrivateIpv6(a.address) : isPrivateIpv4(a.address);
       if (blocked) {
         const e: NodeJS.ErrnoException = new Error(`blocked private address ${a.address} for ${hostname}`);
         e.code = 'EAI_BLOCKED';

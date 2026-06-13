@@ -75,7 +75,10 @@ export function deriveVerdict(store: ManifestStore, trustEvaluated: boolean): Ve
   const state = store.validation_state;
 
   if (state === 'Invalid') return 'invalid';
-  if (state === 'Trusted') return 'trusted';
+  // 'Trusted' only stands when we actually evaluated trust; otherwise stay
+  // honest (defensive — the engine can't emit Trusted without anchors today,
+  // but a future settings change must not surface trusted with trust unevaluated).
+  if (state === 'Trusted') return trustEvaluated ? 'trusted' : 'valid_trust_unknown';
   if (state === 'Valid') return trustEvaluated ? 'valid_untrusted' : 'valid_trust_unknown';
 
   // No authoritative state (older engine / edge case): fail safe. Trust the

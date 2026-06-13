@@ -131,11 +131,10 @@ export async function verifyFileTool(args: { path: string; includeRaw?: boolean 
 
   const mimeType = mimeFromPath(path) ?? undefined;
   const digest = await verifyAsset({ path, mimeType }, args.includeRaw);
-  const structured = digest as unknown as Record<string, unknown>;
-  // Surface an engine failure at the protocol level, not just in the text.
-  return digest.verdict === 'error'
-    ? fail(renderSummary(digest, path), structured)
-    : ok(renderSummary(digest, path), structured);
+  // Collapse engine read-failures into the same generic message as not-found, so
+  // an existing-but-unsupported file can't be told apart from a missing one.
+  if (digest.verdict === 'error') return fail('Cannot access the requested path.');
+  return ok(renderSummary(digest, path), digest as unknown as Record<string, unknown>);
 }
 
 // ── verify_c2pa_url ──────────────────────────────────────────────────────────
@@ -172,7 +171,8 @@ export async function scanDirectoryTool(args: { directory: string; maxFiles?: nu
   try {
     entries = await readdir(dir);
   } catch {
-    return fail(`Directory not found or unreadable: ${dir}`);
+    // Generic, no path echo, so the tool isn't a directory-existence oracle.
+    return fail('Cannot access the requested directory.');
   }
 
   const candidates = entries.filter((name) => {

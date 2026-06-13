@@ -54,6 +54,44 @@ test('buildProvenance renders a manifest cycle as a leaf instead of looping', ()
   assert.equal(nodes[2].depth, 2);
 });
 
+test('buildProvenance keeps distinct same-title ingredients (dedupes only by instance_id)', () => {
+  const store = {
+    active_manifest: 'm0',
+    manifests: {
+      m0: {
+        title: 'Root',
+        signature_info: { common_name: 'S' },
+        ingredients: [
+          { title: 'Untitled', relationship: 'componentOf' },
+          { title: 'Untitled', relationship: 'componentOf' },
+        ],
+      },
+    },
+  };
+  const nodes = buildProvenance(store, 'valid');
+  // root + two distinct "Untitled" leaves — the second must not be suppressed.
+  assert.equal(nodes.length, 3);
+});
+
+test('buildProvenance never elevates a node to trusted from a status code', () => {
+  const store = {
+    active_manifest: 'm0',
+    manifests: {
+      m0: {
+        title: 'Root',
+        signature_info: { common_name: 'S' },
+        ingredients: [
+          { title: 'Ing', relationship: 'parentOf', active_manifest: 'm1', validation_status: [{ code: 'signingCredential.trusted' }] },
+        ],
+      },
+      m1: { title: 'Ing', signature_info: { common_name: 'S' }, ingredients: [] },
+    },
+  };
+  const nodes = buildProvenance(store, 'valid_trust_unknown');
+  const ing = nodes.find((n) => n.relationship === 'Edited from');
+  assert.equal(ing.verdict, 'valid'); // falls back to valid, not 'trusted'
+});
+
 test('extractAi detects trained-algorithmic source and names the tool', () => {
   const store = {
     active_manifest: 'm',

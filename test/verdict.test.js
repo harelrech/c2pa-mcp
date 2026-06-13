@@ -10,7 +10,7 @@ const VERDICT_CASES = [
   { state: 'Invalid', trust: true, verdict: 'invalid' },
   { state: 'Invalid', trust: false, verdict: 'invalid' },
   { state: 'Trusted', trust: true, verdict: 'trusted' },
-  { state: 'Trusted', trust: false, verdict: 'trusted' },
+  { state: 'Trusted', trust: false, verdict: 'valid_trust_unknown' },
   { state: 'Valid', trust: true, verdict: 'valid_untrusted' },
   { state: 'Valid', trust: false, verdict: 'valid_trust_unknown' },
 ];
