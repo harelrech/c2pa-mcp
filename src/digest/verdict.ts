@@ -29,8 +29,13 @@ function allStatuses(store: ManifestStore): ValidationStatus[] {
     if (!Array.isArray(arr)) return;
     for (const s of arr) {
       const code = s?.code;
-      if (!code || seen.has(code)) continue;
-      seen.add(code);
+      if (!code) continue;
+      // Dedupe by code+url, not code alone: the same code can legitimately recur
+      // for different assertions (e.g. two tampered assertions), and dropping the
+      // repeat would understate the issues to the model.
+      const key = `${code}|${s?.url ?? ''}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       out.push(s);
     }
   };

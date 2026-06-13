@@ -67,6 +67,15 @@ function verdictFromStatus(
  * @param rootVerdict the authoritative node verdict for the active asset (from the
  *   store-level validation_state), so the root never contradicts the overall result.
  */
+// An ingredient's node verdict. Honors the v3 `validation_results.failure`
+// bucket (used by Ingredient.V3) first, then the v1/v2 `validation_status` array,
+// so a failed ingredient is never shown as optimistically valid.
+function ingredientVerdict(ing: Ingredient, fallback: NodeVerdict): NodeVerdict {
+  const failures = ing?.validation_results?.activeManifest?.failure;
+  if (Array.isArray(failures) && failures.length > 0) return 'invalid';
+  return verdictFromStatus(ing?.validation_status, fallback);
+}
+
 export function buildProvenance(
   store: ManifestStore | null | undefined,
   rootVerdict: NodeVerdict,
@@ -120,10 +129,7 @@ export function buildProvenance(
 
       if (childManifest && childLabel && !visitedManifests.has(childLabel)) {
         visitedManifests.add(childLabel);
-        const childVerdict = verdictFromStatus(
-          ing?.validation_status,
-          childManifest.signature_info ? 'valid' : 'unknown',
-        );
+        const childVerdict = ingredientVerdict(ing, childManifest.signature_info ? 'valid' : 'unknown');
         walk(childManifest, childRel, ing, childVerdict, depth + 1);
       } else if (childManifest) {
         // Already-walked manifest (cycle): show it as a leaf, don't recurse.
@@ -133,7 +139,7 @@ export function buildProvenance(
           relationship: childRel,
           signer: signerNameOf(childManifest),
           format: ing?.format || childManifest.format || null,
-          verdict: verdictFromStatus(ing?.validation_status, 'unknown'),
+          verdict: ingredientVerdict(ing, 'unknown'),
         });
       } else {
         // Ingredient with no resolvable manifest: still show it as a leaf so the
@@ -144,7 +150,7 @@ export function buildProvenance(
           relationship: childRel,
           signer: null,
           format: ing?.format || null,
-          verdict: verdictFromStatus(ing?.validation_status, 'unknown'),
+          verdict: ingredientVerdict(ing, 'unknown'),
         });
       }
     }

@@ -136,7 +136,18 @@ function safeLookup(
   dnsLookup(hostname, { all: true, verbatim: true }, (err, addresses) => {
     if (err) return callback(err);
     for (const a of addresses) {
-      const blocked = a.family === 6 ? isPrivateIpv6(a.address) : isPrivateIpv4(a.address);
+      let addr = a.address;
+      if (a.family === 6) {
+        // Canonicalize raw resolver output (e.g. fully-expanded 0:0:0:0:0:0:0:1)
+        // through the URL parser before matching, so non-canonical forms can't
+        // slip the literal loopback/mapped checks.
+        try {
+          addr = new URL(`http://[${addr}]/`).hostname.replace(/^\[|\]$/g, '');
+        } catch {
+          /* keep the raw address */
+        }
+      }
+      const blocked = a.family === 6 ? isPrivateIpv6(addr) : isPrivateIpv4(addr);
       if (blocked) {
         const e: NodeJS.ErrnoException = new Error(`blocked private address ${a.address} for ${hostname}`);
         e.code = 'EAI_BLOCKED';
@@ -211,6 +222,7 @@ export async function fetchRemoteAsset(rawUrl: string): Promise<FetchAssetResult
 
       // Manual redirect: re-validate the Location before following.
       if (res.status >= 300 && res.status < 400) {
+        await res.body?.cancel().catch(() => {}); // release the connection before the next hop
         const location = res.headers.get('location');
         if (!location) return { ok: false, code: FetchErrorCode.UpstreamError, detail: 'redirect without location' };
         if (hop === MAX_REDIRECT_HOPS) return { ok: false, code: FetchErrorCode.TooManyRedirects };

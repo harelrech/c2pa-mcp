@@ -1,8 +1,8 @@
 // The four MCP tool handlers. Each returns a human-readable text block (what the
 // model reads) plus structuredContent (the machine-readable digest).
 
-import { readdir, stat } from 'node:fs/promises';
-import { join, resolve, sep } from 'node:path';
+import { readdir, realpath, stat } from 'node:fs/promises';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Digest } from './types.js';
 import { verifyAsset } from './engine/verify.js';
@@ -43,12 +43,22 @@ const ALLOWED_ROOTS: string[] = (process.env.C2PA_ALLOWED_ROOTS || '')
 
 type PathResult = { ok: true; path: string } | { ok: false; reason: string };
 
+// Symlink-resolved allowed roots, memoized. realpath so a symlinked root and a
+// symlink inside a root are both compared on their true target.
+let realRootsCache: string[] | null = null;
+async function realRoots(): Promise<string[]> {
+  if (realRootsCache) return realRootsCache;
+  realRootsCache = await Promise.all(ALLOWED_ROOTS.map((r) => realpath(r).catch(() => r)));
+  return realRootsCache;
+}
+
 /**
  * Resolve a tool-supplied path safely. Accepts absolute/relative paths and
  * local `file://` URIs, but refuses remote `file://` authorities and UNC paths
- * (which trigger outbound SMB / NTLM-leak on Windows) and enforces C2PA_ALLOWED_ROOTS.
+ * (which trigger outbound SMB / NTLM-leak on Windows) and enforces C2PA_ALLOWED_ROOTS
+ * after resolving symlinks (so a link inside a root cannot point outside it).
  */
-function resolveLocalPath(input: string): PathResult {
+export async function resolveLocalPath(input: string): Promise<PathResult> {
   let p = input;
   if (p.startsWith('file://')) {
     let u: URL;
@@ -67,11 +77,24 @@ function resolveLocalPath(input: string): PathResult {
   if (/^[\\/]{2}/.test(p)) return { ok: false, reason: 'refusing UNC path' };
 
   const abs = resolve(p);
-  if (ALLOWED_ROOTS.length > 0) {
-    const within = ALLOWED_ROOTS.some((root) => abs === root || abs.startsWith(root + sep));
-    if (!within) return { ok: false, reason: 'path is outside the allowed roots (C2PA_ALLOWED_ROOTS)' };
+  if (ALLOWED_ROOTS.length === 0) return { ok: true, path: abs };
+
+  // Resolve symlinks before the containment check; fall back to the parent dir
+  // for a path that doesn't exist yet.
+  let real = abs;
+  try {
+    real = await realpath(abs);
+  } catch {
+    try {
+      real = join(await realpath(dirname(abs)), basename(abs));
+    } catch {
+      /* keep abs */
+    }
   }
-  return { ok: true, path: abs };
+  const roots = await realRoots();
+  const within = roots.some((root) => real === root || real.startsWith(root + sep));
+  if (!within) return { ok: false, reason: 'path is outside the allowed roots (C2PA_ALLOWED_ROOTS)' };
+  return { ok: true, path: real };
 }
 
 const FETCH_ERROR_HELP: Record<string, string> = {
@@ -89,7 +112,7 @@ const FETCH_ERROR_HELP: Record<string, string> = {
 
 // ── verify_c2pa_file ─────────────────────────────────────────────────────────
 export async function verifyFileTool(args: { path: string; includeRaw?: boolean }): Promise<ToolResult> {
-  const resolved = resolveLocalPath(args.path);
+  const resolved = await resolveLocalPath(args.path);
   if (!resolved.ok) return fail(`Cannot verify ${args.path}: ${resolved.reason}`);
   const path = resolved.path;
 
@@ -97,9 +120,11 @@ export async function verifyFileTool(args: { path: string; includeRaw?: boolean 
   try {
     info = await stat(path);
   } catch {
-    return fail(`File not found: ${path}`);
+    // One generic message for not-found / not-a-file so the tool can't be used as
+    // a filesystem existence/type oracle by a prompt-injected caller.
+    return fail('Cannot access the requested path.');
   }
-  if (!info.isFile()) return fail(`Not a file: ${path}`);
+  if (!info.isFile()) return fail('Cannot access the requested path.');
   if (info.size > MAX_FILE_BYTES) {
     return fail(`File too large to verify: ${info.size} bytes (limit ${MAX_FILE_BYTES}).`);
   }
@@ -138,7 +163,7 @@ interface ScanEntry {
 }
 
 export async function scanDirectoryTool(args: { directory: string; maxFiles?: number }): Promise<ToolResult> {
-  const resolved = resolveLocalPath(args.directory);
+  const resolved = await resolveLocalPath(args.directory);
   if (!resolved.ok) return fail(`Cannot scan ${args.directory}: ${resolved.reason}`);
   const dir = resolved.path;
   const cap = Math.max(1, Math.min(args.maxFiles ?? 200, 1000));

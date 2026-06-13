@@ -9,7 +9,7 @@
 //    verification still runs but the digest reports trust was not evaluated.
 //    We never silently fall back to a stale snapshot.
 
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createTrustSettings, createVerifySettings, mergeSettings, settingsToJson } from '@contentauth/c2pa-node';
@@ -59,15 +59,19 @@ function nowMs(): number {
 }
 
 async function readDiskCache(): Promise<{ pem: string; fetchedAtMs: number } | null> {
+  let fh: Awaited<ReturnType<typeof open>> | undefined;
   try {
+    fh = await open(CACHE_FILE, 'r');
     // On POSIX, refuse a cache file we don't own or that others can write — it
-    // could have been planted to inject a rogue trust anchor.
+    // could have been planted to inject a rogue trust anchor. fstat the OPEN fd
+    // (not the path) and read from the same fd, so there's no TOCTOU window.
     if (process.platform !== 'win32' && typeof process.getuid === 'function') {
-      const st = await stat(CACHE_FILE);
+      const st = await fh.stat();
       if (st.uid !== process.getuid()) return null;
       if ((st.mode & 0o022) !== 0) return null; // group/other writable
     }
-    const [pem, metaRaw] = await Promise.all([readFile(CACHE_FILE, 'utf8'), readFile(CACHE_META, 'utf8')]);
+    const pem = await fh.readFile('utf8');
+    const metaRaw = await readFile(CACHE_META, 'utf8');
     const meta = JSON.parse(metaRaw) as { fetchedAtMs?: number; urls?: string[] };
     if (!pem.trim() || typeof meta.fetchedAtMs !== 'number') return null;
     // Bind the cache to the exact configured URL set: a cache built for a
@@ -76,6 +80,8 @@ async function readDiskCache(): Promise<{ pem: string; fetchedAtMs: number } | n
     return { pem, fetchedAtMs: meta.fetchedAtMs };
   } catch {
     return null;
+  } finally {
+    await fh?.close().catch(() => {});
   }
 }
 
@@ -112,6 +118,7 @@ async function fetchPem(rawUrl: string): Promise<string> {
         dispatcher: ssrfDispatcher,
       } as RequestInit & { dispatcher: unknown });
       if (res.status >= 300 && res.status < 400) {
+        await res.body?.cancel().catch(() => {}); // release the connection before the next hop
         const location = res.headers.get('location');
         if (!location || hop === 3) throw new Error('too many redirects');
         const next = validateUrl(new URL(location, url).toString());
