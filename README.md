@@ -81,10 +81,10 @@ Environment overrides:
 ## Security
 
 - **Local processing.** Files are read and verified on your machine; nothing is uploaded.
-- **SSRF-guarded URL fetching.** `verify_c2pa_url` accepts only public `https` URLs and refuses private/loopback/link-local/cloud-metadata hosts. It resolves DNS itself and **pins the validated IP** (so a public name that resolves to a private address, e.g. via a rebinding service, is blocked at connect time), re-validates every redirect hop, sends no cookies or auth, and enforces a content-type allowlist (image/video/audio/PDF) plus a size cap.
-- **Local path safety.** The file/scan tools refuse remote `file://` authorities and UNC paths (which would egress over SMB), resolve symlinks before the allowed-roots check, cap file size, and return a single generic error for inaccessible paths (so they can't be used as a filesystem existence oracle).
-- **The file/scan tools expose the host filesystem by design.** An MCP client can let a model call them with attacker-influenced arguments (prompt injection). **In any untrusted context, set `C2PA_ALLOWED_ROOTS`** to confine file access to a specific directory — this is the single most important hardening setting. Treat `includeRaw` output as untrusted, verbose manifest data.
-- **Trust integrity.** Trust lists are fetched over HTTPS; integrity rests on TLS and the upstream sources. The cache is stored under your home directory (`0700`/`0600`, ownership-checked on POSIX) and bound to the configured URL set, so another local user can't plant a rogue anchor.
+- **SSRF-guarded URL fetching.** `verify_c2pa_url` allows only public `https`, pins the resolved IP against DNS rebinding, re-validates every redirect, sends no cookies or auth, and enforces a content-type allowlist plus size cap.
+- **Local path safety.** The file/scan tools reject remote `file://` and UNC paths, resolve symlinks before the allowed-roots check, and return a generic error for inaccessible paths.
+- **Set `C2PA_ALLOWED_ROOTS` in any untrusted context.** The file/scan tools expose the host filesystem by design, so a prompt-injected model could point them anywhere. Confining them to a specific directory is the single most important hardening setting.
+- **Trust integrity.** Trust lists are fetched over HTTPS (integrity rests on TLS and the upstream sources); the cache is per-user (`0700`/`0600`, ownership-checked) and bound to the configured URL set.
 
 ## Limitations
 
