@@ -33,6 +33,17 @@
   ],
   "author": "c2paviewer.com",
   "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/harelrech/c2pa-mcp.git"
+  },
+  "homepage": "https://github.com/harelrech/c2pa-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/harelrech/c2pa-mcp/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@contentauth/c2pa-node": "^0.5.5",
     "@contentauth/c2pa-types": "^0.6.0",
