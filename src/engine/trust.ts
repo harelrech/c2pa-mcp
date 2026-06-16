@@ -56,13 +56,15 @@ export interface TrustSettings {
 }
 
 // Process-lifetime memo so repeated verifications in one run don't re-read disk.
-let memo: { pem: string; fetchedAtMs: number } | null = null;
+// `loaded` is the subset of URLS whose fetch actually succeeded, so trust info
+// reports what was really applied rather than the full configured set.
+let memo: { pem: string; fetchedAtMs: number; loaded: string[] } | null = null;
 
 function nowMs(): number {
   return Date.now();
 }
 
-async function readDiskCache(): Promise<{ pem: string; fetchedAtMs: number } | null> {
+async function readDiskCache(): Promise<{ pem: string; fetchedAtMs: number; loaded: string[] } | null> {
   let fh: Awaited<ReturnType<typeof open>> | undefined;
   try {
     fh = await open(CACHE_FILE, 'r');
@@ -76,12 +78,15 @@ async function readDiskCache(): Promise<{ pem: string; fetchedAtMs: number } | n
     }
     const pem = await fh.readFile('utf8');
     const metaRaw = await readFile(CACHE_META, 'utf8');
-    const meta = JSON.parse(metaRaw) as { fetchedAtMs?: number; urls?: string[] };
+    const meta = JSON.parse(metaRaw) as { fetchedAtMs?: number; urls?: string[]; loaded?: string[] };
     if (!pem.trim() || typeof meta.fetchedAtMs !== 'number') return null;
     // Bind the cache to the exact configured URL set: a cache built for a
     // different trust-list config must not be reused.
     if (!Array.isArray(meta.urls) || meta.urls.join('\n') !== URLS.join('\n')) return null;
-    return { pem, fetchedAtMs: meta.fetchedAtMs };
+    // `loaded` records which URLs actually contributed anchors. Older caches
+    // without it fall back to the full configured set.
+    const loaded = Array.isArray(meta.loaded) ? meta.loaded : URLS;
+    return { pem, fetchedAtMs: meta.fetchedAtMs, loaded };
   } catch {
     return null;
   } finally {
@@ -89,11 +94,14 @@ async function readDiskCache(): Promise<{ pem: string; fetchedAtMs: number } | n
   }
 }
 
-async function writeDiskCache(pem: string, fetchedAtMs: number): Promise<void> {
+async function writeDiskCache(pem: string, fetchedAtMs: number, loaded: string[]): Promise<void> {
   try {
     await mkdir(CACHE_DIR, { recursive: true, mode: 0o700 });
     await writeFile(CACHE_FILE, pem, { encoding: 'utf8', mode: 0o600 });
-    await writeFile(CACHE_META, JSON.stringify({ fetchedAtMs, urls: URLS }), { encoding: 'utf8', mode: 0o600 });
+    await writeFile(CACHE_META, JSON.stringify({ fetchedAtMs, urls: URLS, loaded }), {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
   } catch {
     // A non-writable cache dir is non-fatal; we just lose cross-process caching.
   }
@@ -145,14 +153,39 @@ async function fetchPem(rawUrl: string): Promise<string> {
   }
 }
 
-/** Fetch all configured trust-list URLs and concatenate the successful ones. */
-async function fetchAllPems(): Promise<string> {
+/**
+ * Fetch all configured trust-list URLs and concatenate the successful ones.
+ * Returns the combined PEM plus `loaded` — the URLs that actually contributed —
+ * so the caller can report partial evaluation honestly. Throws if none load.
+ */
+async function fetchAllPems(): Promise<{ pem: string; loaded: string[] }> {
   const results = await Promise.allSettled(URLS.map(fetchPem));
-  const pems = results
-    .filter((r): r is PromiseFulfilledResult<string> => r.status === 'fulfilled')
-    .map((r) => r.value);
+  const pems: string[] = [];
+  const loaded: string[] = [];
+  results.forEach((r, i) => {
+    if (r.status === 'fulfilled') {
+      pems.push(r.value);
+      loaded.push(URLS[i]);
+    }
+  });
   if (pems.length === 0) throw new Error('all trust-list fetches failed');
-  return pems.join('\n');
+  return { pem: pems.join('\n'), loaded };
+}
+
+/**
+ * Build the trust info for a successful (possibly partial) evaluation. Pure and
+ * exported so the partial-reporting logic is unit-testable without the network.
+ * `listSource` reflects only the lists that loaded — never the full configured
+ * set when some failed — and `partial` plus `reason` name what is missing.
+ */
+export function trustInfoFor(loaded: string[], configured: string[]): TrustInfo {
+  const partial = loaded.length < configured.length;
+  const info: TrustInfo = { evaluated: true, listSource: loaded.join(', '), partial };
+  if (partial) {
+    const missing = configured.filter((u) => !loaded.includes(u));
+    info.reason = `Only ${loaded.length} of ${configured.length} configured trust lists loaded; missing: ${missing.join(', ')}.`;
+  }
+  return info;
 }
 
 function buildSettingsJson(pem: string): string {
@@ -172,27 +205,25 @@ function buildSettingsJson(pem: string): string {
  * loudly: returns no trust settings and an info object explaining why.
  */
 export async function getTrustSettings(): Promise<TrustSettings> {
-  const listSource = URLS.join(', ');
-
   // 1. Memory memo within TTL.
   if (memo && isFresh(memo.fetchedAtMs)) {
-    return { settingsJson: buildSettingsJson(memo.pem), info: { evaluated: true, listSource } };
+    return { settingsJson: buildSettingsJson(memo.pem), info: trustInfoFor(memo.loaded, URLS) };
   }
 
   // 2. Disk cache within TTL.
   const disk = await readDiskCache();
   if (disk && isFresh(disk.fetchedAtMs)) {
     memo = disk;
-    return { settingsJson: buildSettingsJson(disk.pem), info: { evaluated: true, listSource } };
+    return { settingsJson: buildSettingsJson(disk.pem), info: trustInfoFor(disk.loaded, URLS) };
   }
 
   // 3. Live fetch.
   try {
-    const pem = await fetchAllPems();
+    const { pem, loaded } = await fetchAllPems();
     const fetchedAtMs = nowMs();
-    memo = { pem, fetchedAtMs };
-    await writeDiskCache(pem, fetchedAtMs);
-    return { settingsJson: buildSettingsJson(pem), info: { evaluated: true, listSource } };
+    memo = { pem, fetchedAtMs, loaded };
+    await writeDiskCache(pem, fetchedAtMs, loaded);
+    return { settingsJson: buildSettingsJson(pem), info: trustInfoFor(loaded, URLS) };
   } catch (err) {
     // Degrade loudly: verify without trust, and say so.
     const reason = `Trust list could not be fetched (${(err as Error).message}); signer trust was not evaluated.`;
@@ -201,6 +232,14 @@ export async function getTrustSettings(): Promise<TrustSettings> {
 }
 
 /** Lightweight status for the c2pa_info tool, without forcing a fetch. */
-export function trustListStatus(): { urls: string[]; ttlSeconds: number; cached: boolean } {
-  return { urls: URLS, ttlSeconds: TTL_SECONDS, cached: !!(memo && isFresh(memo.fetchedAtMs)) };
+export function trustListStatus(): {
+  urls: string[];
+  ttlSeconds: number;
+  cached: boolean;
+  loaded: string[] | null;
+} {
+  const cached = !!(memo && isFresh(memo.fetchedAtMs));
+  // `loaded` is only known once something has been fetched/cached this process;
+  // null means "not yet evaluated", distinct from "evaluated, zero loaded".
+  return { urls: URLS, ttlSeconds: TTL_SECONDS, cached, loaded: cached ? memo!.loaded : null };
 }

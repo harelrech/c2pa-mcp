@@ -68,11 +68,12 @@ export function renderSummary(digest: Digest, label?: string): string {
     }
   }
 
-  lines.push(
-    digest.trust.evaluated
-      ? `Trust: evaluated against ${digest.trust.listSource}`
-      : `Trust: NOT evaluated. ${digest.trust.reason || ''}`.trim(),
-  );
+  if (digest.trust.evaluated) {
+    const partial = digest.trust.partial ? ` (PARTIAL: ${digest.trust.reason || ''})`.trimEnd() : '';
+    lines.push(`Trust: evaluated against ${digest.trust.listSource}${partial}`);
+  } else {
+    lines.push(`Trust: NOT evaluated. ${digest.trust.reason || ''}`.trim());
+  }
 
   return head + lines.join('\n');
 }

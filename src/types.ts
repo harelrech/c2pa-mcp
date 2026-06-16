@@ -72,9 +72,18 @@ export interface IssueEntry {
 export interface TrustInfo {
   /** True when the trust list was loaded and applied during verification. */
   evaluated: boolean;
-  /** The trust-list URL used, when one was applied. */
+  /** The trust-list URL(s) that actually loaded, when one was applied. */
   listSource: string | null;
-  /** Why trust was not evaluated, when `evaluated` is false. */
+  /**
+   * True when some, but not all, configured trust lists loaded. The verdict was
+   * evaluated against fewer anchors than configured, so a signer that only the
+   * missing list recognizes can read as untrusted. `reason` names what is missing.
+   */
+  partial?: boolean;
+  /**
+   * Why trust was not evaluated (when `evaluated` is false), or which configured
+   * lists are missing (when `partial` is true).
+   */
   reason?: string | null;
 }
 
