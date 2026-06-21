@@ -1,6 +1,6 @@
 {
   "name": "@c2paviewer/c2pa-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "An open-source MCP server that verifies C2PA content credentials and returns LLM-ready provenance verdicts. Built by c2paviewer.com.",
   "type": "module",
   "bin": {
