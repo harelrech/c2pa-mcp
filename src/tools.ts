@@ -8,6 +8,7 @@ import type { Digest } from './types.js';
 import { verifyAsset } from './engine/verify.js';
 import { mimeFromPath, SUPPORTED_MIME_TYPES, EXTENSION_TO_MIME } from './engine/formats.js';
 import { trustListStatus } from './engine/trust.js';
+import { getEngineStatus } from './engine/engine.js';
 import { fetchRemoteAsset, FetchErrorCode } from './net/safeFetch.js';
 import { renderSummary } from './render.js';
 
@@ -110,8 +111,22 @@ const FETCH_ERROR_HELP: Record<string, string> = {
   [FetchErrorCode.FetchFailed]: 'The file could not be downloaded.',
 };
 
+// Engine health is a global, path-independent fact — reporting it up front reveals
+// nothing about the specific path/directory/url a caller asked about, so it's safe
+// to check (and return early on) before the anti-oracle path logic below.
+async function engineFailure(): Promise<ToolResult | null> {
+  const engine = await getEngineStatus();
+  if (engine.loaded) return null;
+  return fail(
+    `Verification engine failed to load (${engine.reason}). Try reinstalling @contentauth/c2pa-node.`,
+  );
+}
+
 // ── verify_c2pa_file ─────────────────────────────────────────────────────────
 export async function verifyFileTool(args: { path: string; includeRaw?: boolean }): Promise<ToolResult> {
+  const engineErr = await engineFailure();
+  if (engineErr) return engineErr;
+
   const resolved = await resolveLocalPath(args.path);
   if (!resolved.ok) return fail(`Cannot verify ${args.path}: ${resolved.reason}`);
   const path = resolved.path;
@@ -139,6 +154,9 @@ export async function verifyFileTool(args: { path: string; includeRaw?: boolean 
 
 // ── verify_c2pa_url ──────────────────────────────────────────────────────────
 export async function verifyUrlTool(args: { url: string; includeRaw?: boolean }): Promise<ToolResult> {
+  const engineErr = await engineFailure();
+  if (engineErr) return engineErr;
+
   const fetched = await fetchRemoteAsset(args.url);
   if (!fetched.ok) {
     const help = FETCH_ERROR_HELP[fetched.code] || 'The URL could not be fetched.';
@@ -159,9 +177,13 @@ interface ScanEntry {
   hasCredentials: boolean;
   signer: string | null;
   aiGenerated: boolean;
+  reason?: string;
 }
 
 export async function scanDirectoryTool(args: { directory: string; maxFiles?: number }): Promise<ToolResult> {
+  const engineErr = await engineFailure();
+  if (engineErr) return engineErr;
+
   const resolved = await resolveLocalPath(args.directory);
   if (!resolved.ok) return fail(`Cannot scan ${args.directory}: ${resolved.reason}`);
   const dir = resolved.path;
@@ -190,13 +212,41 @@ export async function scanDirectoryTool(args: { directory: string; maxFiles?: nu
     try {
       info = await stat(path);
     } catch {
+      // Unlike the top-level path tools, this isn't an oracle risk: `name` came
+      // from readdir() of a directory the caller is already allowed to list.
+      results.push({
+        path,
+        verdict: 'error',
+        hasCredentials: false,
+        signer: null,
+        aiGenerated: false,
+        reason: 'could not stat file',
+      });
       continue;
     }
-    if (!info.isFile()) continue;
+    if (!info.isFile()) {
+      results.push({
+        path,
+        verdict: 'error',
+        hasCredentials: false,
+        signer: null,
+        aiGenerated: false,
+        reason: 'not a regular file',
+      });
+      continue;
+    }
     // Skip very large files: verifying hands the path to the native engine, and a
     // directory of huge videos would otherwise hang the whole scan.
     if (info.size > MAX_FILE_BYTES) {
       tooLarge++;
+      results.push({
+        path,
+        verdict: 'error',
+        hasCredentials: false,
+        signer: null,
+        aiGenerated: false,
+        reason: 'exceeds size limit',
+      });
       continue;
     }
     const digest = await verifyAsset({ path, mimeType: mimeFromPath(path) ?? undefined });
@@ -207,30 +257,38 @@ export async function scanDirectoryTool(args: { directory: string; maxFiles?: nu
       hasCredentials: digest.verdict !== 'no_credentials' && digest.verdict !== 'error',
       signer: digest.signer?.name ?? null,
       aiGenerated: digest.aiGenerated.isAI,
+      ...(digest.verdict === 'error' ? { reason: digest.summary } : {}),
     });
   }
 
-  const withCreds = results.filter((r) => r.hasCredentials).length;
-  const aiCount = results.filter((r) => r.aiGenerated).length;
-  const invalid = results.filter((r) => r.verdict === 'invalid').length;
+  // Entries recorded above purely to explain a skip (couldn't stat / not a file /
+  // too large) weren't actually handed to the engine, so they don't count toward
+  // "scanned" even though they now appear in `files[]` with a reason.
+  const SKIP_REASONS = new Set(['could not stat file', 'not a regular file', 'exceeds size limit']);
+  const scannedResults = results.filter((r) => !r.reason || !SKIP_REASONS.has(r.reason));
+
+  const withCreds = scannedResults.filter((r) => r.hasCredentials).length;
+  const aiCount = scannedResults.filter((r) => r.aiGenerated).length;
+  const invalid = scannedResults.filter((r) => r.verdict === 'invalid').length;
 
   const tableLines = results.map(
     (r) =>
-      `  ${r.verdict.padEnd(20)} ${r.aiGenerated ? 'AI ' : '   '} ${r.signer ? `[${r.signer}] ` : ''}${r.path}`,
+      `  ${r.verdict.padEnd(20)} ${r.aiGenerated ? 'AI ' : '   '} ${r.signer ? `[${r.signer}] ` : ''}${r.path}` +
+      (r.reason ? ` — ${r.reason}` : ''),
   );
   const skipNotes = [
     dropped ? `${dropped} past the ${cap}-file cap` : '',
     tooLarge ? `${tooLarge} over the size limit` : '',
   ].filter(Boolean);
   const summary =
-    `Scanned ${results.length} media file(s) in ${dir}` +
+    `Scanned ${scannedResults.length} media file(s) in ${dir}` +
     (skipNotes.length ? ` (skipped: ${skipNotes.join(', ')})` : '') +
     `:\n  with Content Credentials: ${withCreds}\n  AI-declared: ${aiCount}\n  invalid: ${invalid}\n` +
     tableLines.join('\n');
 
   return ok(summary, {
     directory: dir,
-    scanned: results.length,
+    scanned: scannedResults.length,
     skipped: { pastCap: dropped, tooLarge },
     totals: { withCredentials: withCreds, aiDeclared: aiCount, invalid },
     files: results,
@@ -239,17 +297,20 @@ export async function scanDirectoryTool(args: { directory: string; maxFiles?: nu
 
 // ── c2pa_info ────────────────────────────────────────────────────────────────
 export async function infoTool(engineVersion: string, serverVersion: string): Promise<ToolResult> {
+  const engine = await getEngineStatus();
   const trust = trustListStatus();
   const info = {
     server: '@c2paviewer/c2pa-mcp',
     serverVersion,
     engine: '@contentauth/c2pa-node',
     engineVersion,
+    engineStatus: engine,
     supportedMimeTypes: SUPPORTED_MIME_TYPES,
     trustList: trust,
   };
+  const engineLabel = engine.loaded ? 'loaded' : `FAILED: ${engine.reason}`;
   const text =
-    `c2pa-mcp v${serverVersion} (engine @contentauth/c2pa-node v${engineVersion})\n` +
+    `c2pa-mcp v${serverVersion} (engine @contentauth/c2pa-node v${engineVersion}, ${engineLabel})\n` +
     `Supported types: ${SUPPORTED_MIME_TYPES.join(', ')}\n` +
     `Trust list: ${trust.urls.join(', ')} (TTL ${trust.ttlSeconds}s, ${trust.cached ? 'cached' : 'not yet fetched'})`;
   return ok(text, info);

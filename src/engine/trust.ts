@@ -12,9 +12,9 @@
 import { mkdir, open, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { createTrustSettings, createVerifySettings, mergeSettings, settingsToJson } from '@contentauth/c2pa-node';
 import type { TrustInfo } from '../types.js';
 import { validateUrl, ssrfDispatcher } from '../net/safeFetch.js';
+import { requireEngine } from './engine.js';
 
 // Default trust anchors: the official C2PA Conformance Program list (going-forward
 // signers) PLUS the legacy CAI Interim Trust List. The ITL was frozen in Jan 2026,
@@ -188,13 +188,14 @@ export function trustInfoFor(loaded: string[], configured: string[]): TrustInfo 
   return info;
 }
 
-function buildSettingsJson(pem: string): string {
+async function buildSettingsJson(pem: string): Promise<string> {
   // settingsToJson converts the camelCase SettingsContext into the snake_case
   // JSON the underlying c2pa-rs engine expects.
-  return settingsToJson(
-    mergeSettings(
-      createTrustSettings({ verifyTrustList: true, trustAnchors: pem }),
-      createVerifySettings({ verifyTrust: true, verifyAfterReading: true, ocspFetch: false }),
+  const engine = await requireEngine();
+  return engine.settingsToJson(
+    engine.mergeSettings(
+      engine.createTrustSettings({ verifyTrustList: true, trustAnchors: pem }),
+      engine.createVerifySettings({ verifyTrust: true, verifyAfterReading: true, ocspFetch: false }),
     ),
   );
 }
@@ -207,14 +208,14 @@ function buildSettingsJson(pem: string): string {
 export async function getTrustSettings(): Promise<TrustSettings> {
   // 1. Memory memo within TTL.
   if (memo && isFresh(memo.fetchedAtMs)) {
-    return { settingsJson: buildSettingsJson(memo.pem), info: trustInfoFor(memo.loaded, URLS) };
+    return { settingsJson: await buildSettingsJson(memo.pem), info: trustInfoFor(memo.loaded, URLS) };
   }
 
   // 2. Disk cache within TTL.
   const disk = await readDiskCache();
   if (disk && isFresh(disk.fetchedAtMs)) {
     memo = disk;
-    return { settingsJson: buildSettingsJson(disk.pem), info: trustInfoFor(disk.loaded, URLS) };
+    return { settingsJson: await buildSettingsJson(disk.pem), info: trustInfoFor(disk.loaded, URLS) };
   }
 
   // 3. Live fetch.
@@ -223,7 +224,7 @@ export async function getTrustSettings(): Promise<TrustSettings> {
     const fetchedAtMs = nowMs();
     memo = { pem, fetchedAtMs, loaded };
     await writeDiskCache(pem, fetchedAtMs, loaded);
-    return { settingsJson: buildSettingsJson(pem), info: trustInfoFor(loaded, URLS) };
+    return { settingsJson: await buildSettingsJson(pem), info: trustInfoFor(loaded, URLS) };
   } catch (err) {
     // Degrade loudly: verify without trust, and say so.
     const reason = `Trust list could not be fetched (${(err as Error).message}); signer trust was not evaluated.`;

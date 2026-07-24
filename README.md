@@ -29,6 +29,8 @@ No global install needed. Add it to your MCP client config and it runs via `npx`
 
 Requires Node.js 18+.
 
+> **First run:** the underlying engine (`@contentauth/c2pa-node`) downloads a ~18MB native binary on first install. On a slow connection this can outlast an MCP client's startup timeout — if the very first launch seems to hang, let the download finish and relaunch; subsequent runs are instant.
+
 ## Tools
 
 | Tool | What it does |
@@ -91,6 +93,11 @@ Environment overrides:
 - **Experimental. Not legal evidence.** C2PA tooling and trust infrastructure are still evolving. Do not rely on these verdicts for legal, compliance, or safety-critical decisions.
 - **Watermarks are reported as declared, not pixel-verified.** A `synthid` entry means the manifest *declares* a SynthID watermark; confirming the signal in the pixels requires the vendor's detector.
 - **AI-generation reflects what the manifest declares** via IPTC `digitalSourceType`. Absence of an AI declaration is not proof the content is not AI-generated.
+
+## Troubleshooting
+
+- **Every verification fails with "Verification engine failed to load".** The native `@contentauth/c2pa-node` binary was interrupted or corrupted during install (common on slow/unreliable connections). Run `c2pa_info` — it reports `engine: FAILED: <reason>` when this happens. Fix: reinstall the dependency (delete `node_modules/@contentauth/c2pa-node` and reinstall, or `npm cache clean --force` then re-run). Checksum/retry hardening of that download lives in the upstream `@contentauth/c2pa-node` postinstall script, which this project doesn't control.
+- **`verify_c2pa_url` fails with "timed out after ...ms".** The fetch exceeded `C2PA_FETCH_TIMEOUT_MS` (default 30000). Raise it if you're verifying URLs from a slow host.
 
 ## Development
 

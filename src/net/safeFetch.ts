@@ -227,7 +227,14 @@ export async function fetchRemoteAsset(rawUrl: string): Promise<FetchAssetResult
     // One timeout budget covers the whole hop INCLUDING the body read, so a slow-
     // drip server that trickles bytes is aborted rather than held open against the
     // size cap. The timer is cleared in `finally` once the hop fully resolves.
-    const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+    // `timedOut` distinguishes our own timer firing from any other abort/fetch
+    // failure, so the error message can say "timed out" instead of Node's generic
+    // AbortError text.
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      ctrl.abort();
+    }, FETCH_TIMEOUT_MS);
     try {
       let res: Response;
       try {
@@ -238,6 +245,13 @@ export async function fetchRemoteAsset(rawUrl: string): Promise<FetchAssetResult
           headers: { accept: 'image/*,video/*,audio/*,application/pdf', 'user-agent': 'c2pa-mcp' },
         } as RequestInit & { dispatcher: unknown });
       } catch (err) {
+        if (timedOut) {
+          return {
+            ok: false,
+            code: FetchErrorCode.FetchFailed,
+            detail: `timed out after ${FETCH_TIMEOUT_MS}ms (raise with C2PA_FETCH_TIMEOUT_MS)`,
+          };
+        }
         return { ok: false, code: FetchErrorCode.FetchFailed, detail: (err as Error).message };
       }
 
@@ -264,7 +278,14 @@ export async function fetchRemoteAsset(rawUrl: string): Promise<FetchAssetResult
       try {
         buffer = await readCapped(res);
       } catch (err) {
-        // Abort (timeout) or stream error during the body read.
+        if (timedOut) {
+          return {
+            ok: false,
+            code: FetchErrorCode.FetchFailed,
+            detail: `timed out after ${FETCH_TIMEOUT_MS}ms while downloading body (raise with C2PA_FETCH_TIMEOUT_MS)`,
+          };
+        }
+        // Stream error during the body read (not a timeout).
         return { ok: false, code: FetchErrorCode.FetchFailed, detail: `body read failed: ${(err as Error).message}` };
       }
       if (!buffer) return { ok: false, code: FetchErrorCode.TooLarge };

@@ -1,11 +1,11 @@
 // The shared verification core used by every tool: read an asset with the c2pa
 // engine under the current trust settings and return a finished digest.
 
-import { Reader } from '@contentauth/c2pa-node';
 import type { Reader as ManifestStore } from '@contentauth/c2pa-types';
 import type { Digest, TrustInfo } from '../types.js';
 import { buildDigest, noCredentialsDigest } from '../digest/digest.js';
 import { getTrustSettings } from './trust.js';
+import { requireEngine } from './engine.js';
 
 /** A buffer (with MIME) or a filesystem path (MIME inferred from extension). */
 export type VerifyAsset =
@@ -37,7 +37,8 @@ function errorDigest(message: string, trust: TrustInfo): Digest {
 export async function verifyAsset(asset: VerifyAsset, includeRaw = false): Promise<Digest> {
   const trust = await getTrustSettings();
   try {
-    const reader = await Reader.fromAsset(asset, trust.settingsJson);
+    const engine = await requireEngine();
+    const reader = await engine.Reader.fromAsset(asset, trust.settingsJson);
     if (!reader) return noCredentialsDigest(trust.info);
     const store = reader.json() as ManifestStore;
     return buildDigest(store, { trust: trust.info, includeRaw });
