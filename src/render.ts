@@ -3,6 +3,7 @@
 // for programmatic clients.
 
 import type { Digest } from './types.js';
+import { UNTRUSTED_SIGNER_CODE } from './digest/verdict.js';
 
 const VERDICT_LABEL: Record<Digest['verdict'], string> = {
   trusted: 'TRUSTED',
@@ -33,7 +34,14 @@ export function renderSummary(digest: Digest, label?: string): string {
   if (digest.generator) lines.push(`Produced with: ${digest.generator}`);
 
   if (digest.signer) {
-    const trust = digest.signer.trusted ? 'on the C2PA trust list' : 'not on the trust list';
+    // Only call the signer "not on the trust list" when the engine said so about
+    // the signer itself; an untrusted timestamp authority is a different cert.
+    const signerFlagged = digest.issues.some((i) => i.code === UNTRUSTED_SIGNER_CODE);
+    const trust = digest.signer.trusted
+      ? 'on the C2PA trust list'
+      : signerFlagged
+        ? 'not on the trust list'
+        : 'trust not confirmed';
     lines.push(`Signer: ${digest.signer.name || 'undisclosed'} (${trust})`);
   }
 
@@ -48,7 +56,8 @@ export function renderSummary(digest: Digest, label?: string): string {
     for (const node of digest.provenance) {
       const indent = '  '.repeat(node.depth + 1);
       const signer = node.signer ? ` [${node.signer}]` : '';
-      lines.push(`${indent}- ${node.relationship}: ${node.title} (${node.verdict})${signer}`);
+      const codes = node.issues.length ? ` — ${node.issues.map((i) => i.code).join(', ')}` : '';
+      lines.push(`${indent}- ${node.relationship}: ${node.title} (${node.verdict})${signer}${codes}`);
     }
   }
 
@@ -65,6 +74,16 @@ export function renderSummary(digest: Digest, label?: string): string {
     lines.push('Issues:');
     for (const issue of digest.issues) {
       lines.push(`  ${SEVERITY_MARK[issue.severity] || '-'} ${issue.code}: ${issue.explanation}`);
+    }
+  }
+
+  if (digest.ingredientIssues.length) {
+    lines.push('Provenance chain issues (earlier versions, not this file\'s own signature):');
+    for (const ing of digest.ingredientIssues) {
+      const who = ing.ingredientTitle || ing.manifestLabel || 'ingredient';
+      for (const c of ing.codes) {
+        lines.push(`  ${SEVERITY_MARK[c.severity] || '-'} ${who}: ${c.code}: ${c.explanation}`);
+      }
     }
   }
 

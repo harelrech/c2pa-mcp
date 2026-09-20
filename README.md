@@ -44,18 +44,30 @@ Each verify tool returns a human-readable summary plus a structured digest:
 
 ```jsonc
 {
-  "verdict": "invalid",            // trusted | valid_untrusted | valid_trust_unknown | invalid | no_credentials
-  "summary": "Content Credentials are INVALID: an integrity or signature check failed ...",
+  "verdict": "valid_untrusted",    // trusted | valid_untrusted | valid_trust_unknown | invalid | no_credentials | error
+  "summary": "Content Credentials are cryptographically valid, but the signer ... 1 earlier version in its provenance chain failed validation; this file's own signature is unaffected.",
   "signer": { "name": "Example Signer", "trusted": false },
   "aiGenerated": { "isAI": true, "tools": ["DALL-E"], "digitalSourceTypes": ["...trainedAlgorithmicMedia"] },
-  "provenance": [ { "depth": 0, "title": "This file", "relationship": "This file", "verdict": "invalid" } ],
+  "provenance": [
+    { "depth": 0, "title": "This file", "relationship": "This file", "verdict": "valid", "manifestLabel": "urn:...", "issues": [] },
+    { "depth": 1, "title": "source.jpg", "relationship": "Edited from", "verdict": "invalid", "manifestLabel": "urn:...",
+      "issues": [ { "code": "claimSignature.mismatch", "severity": "error", "explanation": "..." } ] }
+  ],
   "edits": [ { "label": "Created", "agent": "Photoshop", "when": "...", "detail": "" } ],
   "watermarks": [ { "kind": "synthid", "assertionLabel": "...", "algorithm": "" } ],
-  "issues": [ { "code": "assertion.dataHash.mismatch", "severity": "error",
-               "explanation": "The media content was changed after it was signed. ..." } ],
+  "issues": [ { "code": "signingCredential.untrusted", "severity": "warning",   // THIS file's own problems only
+               "explanation": "The signature is cryptographically valid, but ..." } ],
+  "ingredientIssues": [                                                           // problems on earlier versions in the chain
+    { "ingredientTitle": "source.jpg", "manifestLabel": "urn:...", "worstSeverity": "error",
+      "codes": [ { "code": "claimSignature.mismatch", "severity": "error", "explanation": "..." } ] }
+  ],
   "trust": { "evaluated": true, "listSource": "https://.../C2PA-TRUST-LIST.pem" }
 }
 ```
+
+### Provenance chain vs. the file itself
+
+`issues` and `verdict` describe the **active manifest** — this file's own signature and content. Problems found on **ingredients** (earlier versions or components the file was made from) are reported separately in `ingredientIssues` and on the matching `provenance[].issues`, and never change the file's verdict. This follows C2PA 2.2 §15.11 (a validator must report a failing ingredient, but the active manifest keeps its own result) and matches what [CAI Verify](https://verify.contentauthenticity.org) shows. So a file re-signed from a tampered original can legitimately be `trusted` while its lineage shows an `invalid` node — the model should read both.
 
 Pass `"includeRaw": true` to also get the full raw manifest store.
 

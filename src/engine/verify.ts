@@ -25,6 +25,7 @@ function errorDigest(message: string, trust: TrustInfo): Digest {
     edits: [],
     watermarks: [],
     issues: [],
+    ingredientIssues: [],
     trust,
   };
 }

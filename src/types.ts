@@ -46,6 +46,33 @@ export interface ProvenanceEntry {
   signer: string | null;
   format: string | null;
   verdict: NodeVerdict;
+  /** Label of this node's manifest in the store's `manifests` map, when resolvable. */
+  manifestLabel: string | null;
+  /**
+   * Validation problems reported against THIS node (errors + warnings, never
+   * info). Always present; `[]` for a clean node. The root node's own problems
+   * live in `Digest.issues`, so its list is always empty.
+   */
+  issues: IssueEntry[];
+}
+
+/**
+ * Validation problems belonging to an *ingredient* in the provenance chain,
+ * kept deliberately separate from the active manifest's own `issues`.
+ *
+ * C2PA 2.2 §15.11: a failing ingredient does NOT invalidate the active manifest,
+ * but a validator must still report it. Folding these into `Digest.issues`
+ * would let an earlier version's failure read as this file's own failure —
+ * the model would see "verdict: valid" next to "[x] claimSignature.mismatch".
+ */
+export interface IngredientIssue {
+  /** Ingredient title, when the ingredient object itself was reachable. */
+  ingredientTitle: string | null;
+  /** Label of the failing manifest in the store's `manifests` map, when derivable. */
+  manifestLabel: string | null;
+  /** Errors + warnings only, deduped by code. */
+  codes: IssueEntry[];
+  worstSeverity: 'error' | 'warning';
 }
 
 export interface EditEntry {
@@ -105,8 +132,17 @@ export interface Digest {
   edits: EditEntry[];
   /** Declared (not pixel-verified) watermarks such as SynthID. */
   watermarks: WatermarkEntry[];
-  /** Validation issues that matter (errors + warnings), each explained. */
+  /**
+   * Validation issues that matter (errors + warnings) for the ACTIVE manifest —
+   * this file's own signature and content. Problems found on earlier versions
+   * in the chain are reported in `ingredientIssues` instead.
+   */
   issues: IssueEntry[];
+  /**
+   * Problems found on ingredients (earlier versions / components) in the
+   * provenance chain. Never affects `verdict` — see IngredientIssue.
+   */
+  ingredientIssues: IngredientIssue[];
   trust: TrustInfo;
   /** The full raw ManifestStore, only when the caller asked for it. */
   raw?: unknown;

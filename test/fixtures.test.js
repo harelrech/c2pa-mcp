@@ -68,3 +68,71 @@ test('includeRaw=true attaches the raw manifest store', async () => {
   const d = await verify('valid-untrusted.jpg', true);
   assert.ok(d.raw);
 });
+
+// ── Provenance-chain fixtures (C2PA 2.2 §15.11) ──────────────────────────────
+//
+// A failing ingredient must be REPORTED but must never repaint the file's own
+// verdict or its `issues`. These assertions are trust-independent: they check
+// chain codes, node verdicts and error-severity only, never warnings (an
+// ingredient off the live trust list is a legitimate warning).
+
+const nonRoot = (d) => d.provenance.filter((n) => n.depth > 0);
+const chainCodes = (d) => d.ingredientIssues.flatMap((i) => i.codes.map((c) => c.code));
+
+test('valid-resigned-broken-chain-v1.jpg: broken ingredient reported on its own channel', async () => {
+  const d = await verify('valid-resigned-broken-chain-v1.jpg');
+  assert.notEqual(d.verdict, 'invalid');
+  assert.ok(!d.issues.some((i) => i.severity === 'error'), `file-level errors: ${d.issues.map((i) => i.code)}`);
+  const broken = d.ingredientIssues.find((i) => i.codes.some((c) => c.code === 'claimSignature.mismatch'));
+  assert.ok(broken, 'claimSignature.mismatch missing from ingredientIssues');
+  assert.equal(broken.worstSeverity, 'error');
+  assert.equal(broken.ingredientTitle, 'E-sig-CA.jpg');
+  const invalidNodes = nonRoot(d).filter((n) => n.verdict === 'invalid');
+  assert.equal(invalidNodes.length, 1);
+  assert.ok(invalidNodes[0].issues.some((c) => c.code === 'claimSignature.mismatch'));
+  assert.match(d.summary, /earlier version in its provenance chain failed/);
+});
+
+test('valid-resigned-broken-chain-v3.jpg: Ingredient V3 wrapper failures surface and paint two nodes', async () => {
+  const d = await verify('valid-resigned-broken-chain-v3.jpg');
+  assert.notEqual(d.verdict, 'invalid');
+  assert.ok(!d.issues.some((i) => i.severity === 'error'), `file-level errors: ${d.issues.map((i) => i.code)}`);
+  const codes = chainCodes(d);
+  for (const code of ['signingCredential.invalid', 'claimSignature.mismatch', 'ingredient.manifest.mismatch']) {
+    assert.ok(codes.includes(code), `missing chain code ${code}`);
+  }
+  assert.equal(nonRoot(d).filter((n) => n.verdict === 'invalid').length, 2);
+});
+
+for (const file of ['valid-v3-chain-clean.jpg', 'valid-untrusted-info-only-ingredient.jpg']) {
+  test(`${file}: clean chain has no chain errors and no invalid node`, async () => {
+    const d = await verify(file);
+    const errs = d.ingredientIssues.flatMap((i) => i.codes).filter((c) => c.severity === 'error');
+    assert.deepEqual(errs.map((c) => c.code), []);
+    assert.deepEqual(nonRoot(d).filter((n) => n.verdict === 'invalid').map((n) => n.title), []);
+    assert.doesNotMatch(d.summary, /provenance chain failed/);
+  });
+}
+
+// Unconditional invariant, every fixture: an info-severity code is a PASSING
+// check (e.g. signingCredential.ocsp.notRevoked) and must never be presented
+// as a chain issue or a node issue.
+const ALL_FIXTURES = [
+  ...CASES.map((c) => c.file),
+  'valid-resigned-broken-chain-v1.jpg',
+  'valid-resigned-broken-chain-v3.jpg',
+  'valid-v3-chain-clean.jpg',
+  'valid-untrusted-info-only-ingredient.jpg',
+];
+for (const file of ALL_FIXTURES) {
+  test(`${file}: no info-severity code leaks into chain or node issues`, async () => {
+    const d = await verify(file);
+    const leaked = [
+      ...d.ingredientIssues.flatMap((i) => i.codes),
+      ...d.provenance.flatMap((n) => n.issues),
+    ].filter((c) => c.severity === 'info');
+    assert.deepEqual(leaked.map((c) => c.code), []);
+    assert.ok(d.provenance.every((n) => Array.isArray(n.issues)));
+    assert.deepEqual(d.provenance[0]?.issues ?? [], []);
+  });
+}
