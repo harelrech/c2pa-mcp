@@ -30,6 +30,17 @@ Aligns provenance-chain reporting with c2paviewer.com and C2PA 2.2 §15.11.
 - `timeStamp.untrusted` is no longer described as "the signer is not on the
   C2PA trust list"; only `signingCredential.untrusted` triggers that sentence.
 
+### Trust
+- Trust is now evaluated against the same five inputs as c2paviewer.com:
+  C2PA conformance anchors, C2PA **TSA** anchors, CAI interim anchors, the CAI
+  **end-entity allow-list** (`allowed.sha256.txt`) and the CAI **EKU config**
+  (`store.cfg`). Previously only the two anchor PEMs were loaded, so signers
+  recognized via the allow-list (e.g. Fastly) read `valid_untrusted` here while
+  the site showed them Trusted. New env overrides `C2PA_TRUST_ALLOWED_LIST_URL`
+  and `C2PA_TRUST_CONFIG_URL` (empty string disables). The disk cache is now a
+  single `trust-bundle.json`; the old `trust-anchors.pem` is ignored.
+- Opt-in live tests: `C2PA_LIVE_TRUST_TESTS=1 npm test`.
+
 ### Dependencies
 - `@contentauth/c2pa-node` 0.5.5 → 0.6.3 (pinned). 0.5.5 reported an active
   manifest as `Invalid` when only an Ingredient V3 chain member failed and

@@ -20,6 +20,7 @@ shapes c2pa-rs uses to report ingredient problems.
 | File | Origin | Expected |
 |------|--------|----------|
 | `valid-v3-chain-clean.jpg` | Two Google Gemini images merged and re-signed by Gemini (4 manifests, 3 levels). | `trusted` with a live trust list; no chain errors, no `invalid` node. Its only non-success code is `signingCredential.ocsp.notRevoked` — a *passing* check that a substring regex once misread as "revoked". |
+| `trusted-allowlist-signer.avif` | Adobe Firefly image re-encoded by Fastly Image Optimizer (project maintainer's own asset). | `trusted` with live lists — Fastly's cert is recognised only via the CAI `allowed.sha256.txt` end-entity allow-list, not a CA anchor. Used by the opt-in `trust-live.test.js`; offline it reads `valid_trust_unknown`. |
 | `valid-untrusted-info-only-ingredient.jpg` | Anthropic Claude Files API output (claim generator `Anthropic Files 1.0.0`). | `valid_untrusted` (Anthropic's root CA is on neither trust list as of 2026-09); its ingredient reports only `ingredient.unknownProvenance`, which is info-severity and must not surface. |
 
 They are signed with C2PA test certificates that are intentionally not on the

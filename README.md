@@ -73,20 +73,28 @@ Pass `"includeRaw": true` to also get the full raw manifest store.
 
 ## Trust list
 
-To report a signer as **`trusted`** (not just cryptographically valid), the server checks the signing certificate against two trust lists, **fetched live and cached** (24h TTL) so decisions stay current without a release:
+To report a signer as **`trusted`** (not just cryptographically valid), the server checks the signing certificate against the **same five trust inputs c2paviewer.com uses**, **fetched live and cached** (24h TTL) so decisions stay current without a release:
 
-- the official [C2PA Conformance Program list](https://github.com/c2pa-org/conformance-public) (going-forward signers), and
-- the legacy [CAI Interim Trust List](https://verify.contentauthenticity.org/trust/anchors.pem) (frozen Jan 2026, but still the only list that recognizes pre-conformance signers — Adobe, Leica, Truepic, Canon, Samsung, and most real-world content today).
+**Official C2PA Conformance Program** (going-forward signers)
+- [`C2PA-TRUST-LIST.pem`](https://github.com/c2pa-org/conformance-public) — CA anchors for claim signers
+- [`C2PA-TSA-TRUST-LIST.pem`](https://github.com/c2pa-org/conformance-public) — CA anchors for Time-Stamp Authorities (folded into the same anchor bundle; without it valid files can carry `timeStamp.untrusted`)
 
-Both are on by default; without the ITL, mainstream signed content would read as `valid_untrusted`.
+**CAI Interim Trust List** (frozen Jan 2026, officially temporary, but still the only thing that recognizes pre-conformance signers — Adobe, Leica, Truepic, Canon, Samsung, Fastly, and most real-world content today)
+- [`anchors.pem`](https://verify.contentauthenticity.org/trust/anchors.pem) — legacy CA anchors
+- [`allowed.sha256.txt`](https://verify.contentauthenticity.org/trust/allowed.sha256.txt) — allow-list of specific end-entity certificate hashes; a signer whose leaf cert is listed is trusted even when nothing chains to an anchor
+- [`store.cfg`](https://verify.contentauthenticity.org/trust/store.cfg) — accepted Extended Key Usage OIDs
 
-If the trust lists can't be fetched, the server **degrades loudly**: verification still runs, but the verdict becomes `valid_trust_unknown` and `trust.evaluated` is `false` with a reason. It never silently treats an unknown signer as trusted, and never silently uses a stale snapshot.
+Without the interim group, mainstream signed content reads as `valid_untrusted`.
+
+If an input can't be fetched, the server **degrades loudly**: with at least one anchor list loaded it still evaluates trust but sets `trust.partial: true` and names the missing input in `trust.reason` (signers recognized only by that input will read as untrusted); with no anchors at all the verdict becomes `valid_trust_unknown` and `trust.evaluated` is `false`. It never silently treats an unknown signer as trusted, and never silently uses a stale snapshot.
 
 Environment overrides:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `C2PA_TRUST_LIST_URL` | conformance + ITL | Comma-separated PEM URLs. Replaces the defaults (conformance list + Interim Trust List). |
+| `C2PA_TRUST_LIST_URL` | conformance + TSA + ITL anchors | Comma-separated PEM URLs. Replaces the default anchor set. |
+| `C2PA_TRUST_ALLOWED_LIST_URL` | CAI `allowed.sha256.txt` | End-entity allow-list URL. Set to an empty string to disable. |
+| `C2PA_TRUST_CONFIG_URL` | CAI `store.cfg` | EKU config URL. Set to an empty string to disable. |
 | `C2PA_TRUST_TTL_SECONDS` | `86400` | Cache lifetime for the fetched trust list. |
 | `C2PA_MAX_FETCH_BYTES` | `104857600` | Max download size for `verify_c2pa_url` (100 MB). |
 | `C2PA_MAX_FILE_BYTES` | `524288000` | Max size of a local file the file/scan tools will verify (500 MB). |
