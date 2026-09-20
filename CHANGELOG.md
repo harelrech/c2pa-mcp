@@ -33,8 +33,9 @@ Aligns provenance-chain reporting with c2paviewer.com and C2PA 2.2 §15.11.
 ### Dependencies
 - `@contentauth/c2pa-node` 0.5.5 → 0.6.3 (pinned). 0.5.5 reported an active
   manifest as `Invalid` when only an Ingredient V3 chain member failed and
-  bubbled the ingredient's codes into the store aggregate; 0.6.3 keeps them
-  separate, matching the site's verifier.
+  bubbled the ingredient's codes into the store aggregate (observed on a
+  Fastly-re-signed file); 0.6.3 keeps them separate, matching the site's
+  verifier.
 
 ## 0.1.3 — 2026-07-24
 - Detect a broken native engine instead of crashing or misreporting it.

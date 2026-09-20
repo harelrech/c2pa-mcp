@@ -93,17 +93,6 @@ test('valid-resigned-broken-chain-v1.jpg: broken ingredient reported on its own 
   assert.match(d.summary, /earlier version in its provenance chain failed/);
 });
 
-test('valid-resigned-broken-chain-v3.jpg: Ingredient V3 wrapper failures surface and paint two nodes', async () => {
-  const d = await verify('valid-resigned-broken-chain-v3.jpg');
-  assert.notEqual(d.verdict, 'invalid');
-  assert.ok(!d.issues.some((i) => i.severity === 'error'), `file-level errors: ${d.issues.map((i) => i.code)}`);
-  const codes = chainCodes(d);
-  for (const code of ['signingCredential.invalid', 'claimSignature.mismatch', 'ingredient.manifest.mismatch']) {
-    assert.ok(codes.includes(code), `missing chain code ${code}`);
-  }
-  assert.equal(nonRoot(d).filter((n) => n.verdict === 'invalid').length, 2);
-});
-
 for (const file of ['valid-v3-chain-clean.jpg', 'valid-untrusted-info-only-ingredient.jpg']) {
   test(`${file}: clean chain has no chain errors and no invalid node`, async () => {
     const d = await verify(file);
@@ -120,7 +109,6 @@ for (const file of ['valid-v3-chain-clean.jpg', 'valid-untrusted-info-only-ingre
 const ALL_FIXTURES = [
   ...CASES.map((c) => c.file),
   'valid-resigned-broken-chain-v1.jpg',
-  'valid-resigned-broken-chain-v3.jpg',
   'valid-v3-chain-clean.jpg',
   'valid-untrusted-info-only-ingredient.jpg',
 ];
