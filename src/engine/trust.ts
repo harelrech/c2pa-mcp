@@ -24,7 +24,10 @@ import { requireEngine } from './engine.js';
 //   - C2PA-TRUST-LIST.pem      CA anchors for claim signers
 //   - C2PA-TSA-TRUST-LIST.pem  CA anchors for Time-Stamp Authorities. c2pa-node
 //                              has no separate TSA slot, so it is folded into the
-//                              same anchors bundle — exactly as the site does.
+//                              same anchors bundle, exactly as the site does. Note
+//                              the consequence: those CAs become acceptable
+//                              CLAIM-SIGNER anchors too. The EKU config below is
+//                              what keeps a timestamping cert from signing claims.
 //
 // CAI Interim Trust List (frozen Jan 2026, officially temporary, but still the
 // only thing that recognizes pre-conformance signers — Adobe, Leica, Truepic,
@@ -246,6 +249,11 @@ async function fetchBundle(): Promise<TrustBundle> {
   return { pem: pems.join('\n'), allowedList: allowedResult, trustConfig: configResult, fetchedAtMs: nowMs(), loaded };
 }
 
+/** True when every configured input loaded. Only a complete bundle is persisted. */
+export function isCompleteBundle(loaded: string[], configured: string[]): boolean {
+  return configured.every((u) => loaded.includes(u));
+}
+
 /**
  * Build the trust info for a successful (possibly partial) evaluation. Pure and
  * exported so the partial-reporting logic is unit-testable without the network.
@@ -264,7 +272,9 @@ export function trustInfoFor(loaded: string[], configured: string[]): TrustInfo 
 
 async function buildSettingsJson(bundle: TrustBundle): Promise<string> {
   // settingsToJson converts the camelCase SettingsContext into the snake_case
-  // JSON the underlying c2pa-rs engine expects.
+  // JSON the underlying c2pa-rs engine expects. `trustConfig`/`allowedList`
+  // take the documents' CONTENTS (c2pa-rs reads them inline), despite the
+  // binding's JSDoc calling them paths.
   const engine = await requireEngine();
   return engine.settingsToJson(
     engine.mergeSettings(
@@ -301,7 +311,10 @@ export async function getTrustSettings(): Promise<TrustSettings> {
   try {
     const bundle = await fetchBundle();
     memo = bundle;
-    await writeDiskCache(bundle);
+    // A partial bundle is used for this process (loudly, via trust.partial) but
+    // never written to disk: persisting it would lock every process on the
+    // machine into the degraded state for a full TTL after a transient outage.
+    if (isCompleteBundle(bundle.loaded, ALL_URLS)) await writeDiskCache(bundle);
     return { settingsJson: await buildSettingsJson(bundle), info: trustInfoFor(bundle.loaded, ALL_URLS) };
   } catch (err) {
     // Degrade loudly: verify without trust, and say so.

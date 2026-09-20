@@ -55,13 +55,13 @@ Each verify tool returns a human-readable summary plus a structured digest:
   ],
   "edits": [ { "label": "Created", "agent": "Photoshop", "when": "...", "detail": "" } ],
   "watermarks": [ { "kind": "synthid", "assertionLabel": "...", "algorithm": "" } ],
-  "issues": [ { "code": "signingCredential.untrusted", "severity": "warning",   // THIS file's own problems only
+  "issues": [ { "code": "signingCredential.untrusted", "severity": "warning",   // THIS file's own problems (plus whatever drove an Invalid verdict)
                "explanation": "The signature is cryptographically valid, but ..." } ],
   "ingredientIssues": [                                                           // problems on earlier versions in the chain
     { "ingredientTitle": "source.jpg", "manifestLabel": "urn:...", "worstSeverity": "error",
       "codes": [ { "code": "claimSignature.mismatch", "severity": "error", "explanation": "..." } ] }
   ],
-  "trust": { "evaluated": true, "listSource": "https://.../C2PA-TRUST-LIST.pem" }
+  "trust": { "evaluated": true, "partial": false, "listSource": "https://.../C2PA-TRUST-LIST.pem, ..." }
 }
 ```
 

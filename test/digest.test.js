@@ -263,7 +263,7 @@ test('(b6) an untrusted timestamp authority is not described as an untrusted sig
   assert.match(buildSummary('valid_untrusted', { name: 'X' }, false, []), /signer \(X\) is not on/);
 });
 
-test('ingredient failures never change the root verdict, even when validation_state is absent', () => {
+test('ingredientDeltas never change the root verdict, even when validation_state is absent', () => {
   const store = {
     active_manifest: 'm0',
     manifests: {
@@ -279,4 +279,126 @@ test('ingredient failures never change the root verdict, even when validation_st
   assert.notEqual(d.verdict, 'invalid');
   assert.deepEqual(d.issues, []);
   assert.deepEqual(chainCodes(d), ['claimSignature.mismatch']);
+});
+
+// ── Review follow-ups (PR #2) ────────────────────────────────────────────────
+
+test('(review 1) store-level validation_status entries naming an ingredient go to the chain, not Digest.issues', () => {
+  const store = {
+    validation_state: 'Trusted',
+    active_manifest: 'm0',
+    manifests: {
+      m0: { signature_info: { common_name: 'Adobe' }, ingredients: [{ title: 'Ing', active_manifest: 'm1' }] },
+      m1: { signature_info: { common_name: 'Other' } },
+    },
+    validation_status: [
+      { code: 'signingCredential.trusted', url: 'self#jumbf=/c2pa/m0/c2pa.signature' },
+      { code: 'signingCredential.untrusted', url: 'self#jumbf=/c2pa/m1/c2pa.signature' },
+    ],
+  };
+  const d = buildDigest(store, { trust: TRUST });
+  assert.equal(d.verdict, 'trusted');
+  assert.deepEqual(d.issues, []);
+  assert.deepEqual(chainCodes(d), ['signingCredential.untrusted']);
+  assert.equal(d.provenance.find((n) => n.title === 'Ing').verdict, 'warning');
+  assert.doesNotMatch(d.summary, /not on the C2PA trust list/);
+});
+
+test('(review 1b) an aggregate error that drove validation_state to Invalid stays in Digest.issues', () => {
+  const store = {
+    validation_state: 'Invalid',
+    active_manifest: 'm0',
+    manifests: { m0: { signature_info: { common_name: 'S' }, ingredients: [{ active_manifest: 'm1' }] }, m1: {} },
+    validation_status: [{ code: 'assertion.hashedURI.mismatch', url: 'self#jumbf=/c2pa/m1/c2pa.assertions/x' }],
+  };
+  const d = buildDigest(store, { trust: TRUST });
+  assert.equal(d.verdict, 'invalid');
+  assert.deepEqual(d.issues.map((i) => i.code), ['assertion.hashedURI.mismatch']);
+});
+
+test('(review 2) with validation_state absent, an ingredient-attributed aggregate error does not flip the root', () => {
+  const store = {
+    active_manifest: 'm0',
+    manifests: { m0: { signature_info: { common_name: 'S' }, ingredients: [{ title: 'Ing', active_manifest: 'm1' }] }, m1: {} },
+    validation_status: [{ code: 'claimSignature.mismatch', url: 'self#jumbf=/c2pa/m1/c2pa.signature' }],
+  };
+  const d = buildDigest(store, { trust: TRUST });
+  assert.notEqual(d.verdict, 'invalid');
+  assert.deepEqual(d.issues, []);
+  assert.deepEqual(chainCodes(d), ['claimSignature.mismatch']);
+  assert.equal(d.provenance.find((n) => n.title === 'Ing').verdict, 'invalid');
+});
+
+test('(review 3a) a table-error code the engine filed under informational is capped at warning', () => {
+  const store = {
+    validation_state: 'Trusted',
+    active_manifest: 'm0',
+    manifests: {
+      m0: { signature_info: { common_name: 'S' }, ingredients: [{ title: 'Ing', active_manifest: 'm1' }] },
+      m1: { signature_info: { common_name: 'S' } },
+    },
+    validation_results: {
+      activeManifest: { success: [], informational: [], failure: [] },
+      ingredientDeltas: [{ validationDeltas: { success: [], informational: [{ code: 'timeStamp.mismatch', url: 'self#jumbf=/c2pa/m1/c2pa.signature' }], failure: [] } }],
+    },
+  };
+  const d = buildDigest(store, { trust: TRUST });
+  const node = d.provenance.find((n) => n.title === 'Ing');
+  assert.equal(node.verdict, 'warning');
+  assert.equal(d.ingredientIssues[0].worstSeverity, 'warning');
+  assert.doesNotMatch(d.summary, /failed validation/);
+});
+
+test('(review 3b) an unknown code the engine filed under failure is floored at error', () => {
+  const store = {
+    validation_state: 'Trusted',
+    active_manifest: 'm0',
+    manifests: {
+      m0: { signature_info: { common_name: 'S' }, ingredients: [{ title: 'Ing', active_manifest: 'm1', validation_results: { activeManifest: { success: [], informational: [], failure: [{ code: 'future.unknownCode' }] }, ingredientDeltas: [] } }] },
+      m1: { signature_info: { common_name: 'S' } },
+    },
+  };
+  const d = buildDigest(store, { trust: TRUST });
+  assert.equal(d.provenance.find((n) => n.title === 'Ing').verdict, 'invalid');
+  assert.equal(d.ingredientIssues[0].codes[0].severity, 'error');
+});
+
+test('(review 4) an ingredient with no manifest label still carries its own issues on its node', () => {
+  const store = {
+    validation_state: 'Trusted',
+    active_manifest: 'm0',
+    manifests: {
+      m0: { signature_info: { common_name: 'S' }, ingredients: [{ title: 'lost.jpg', validation_status: [{ code: 'ingredient.manifest.missing' }] }] },
+    },
+  };
+  const d = buildDigest(store, { trust: TRUST });
+  const node = d.provenance.find((n) => n.title === 'lost.jpg');
+  assert.equal(node.verdict, 'invalid');
+  assert.equal(node.manifestLabel, null);
+  assert.deepEqual(node.issues.map((c) => c.code), ['ingredient.manifest.missing']);
+  assert.equal(d.ingredientIssues[0].ingredientTitle, 'lost.jpg');
+});
+
+test('(review 5) a manifest at the depth cap with no ingredients does not raise maxDepthReached', () => {
+  const manifests = {};
+  for (let i = 0; i <= 20; i++) {
+    manifests[`m${i}`] = { signature_info: { common_name: 'S' }, ingredients: i < 20 ? [{ active_manifest: `m${i + 1}` }] : [] };
+  }
+  const d = buildDigest({ validation_state: 'Trusted', active_manifest: 'm0', manifests }, { trust: TRUST });
+  assert.ok(!d.issues.some((i) => i.code === 'security.maxDepthReached'));
+  manifests.m20.ingredients = [{ active_manifest: 'm21' }];
+  manifests.m21 = { signature_info: { common_name: 'S' } };
+  const d2 = buildDigest({ validation_state: 'Trusted', active_manifest: 'm0', manifests }, { trust: TRUST });
+  assert.ok(d2.issues.some((i) => i.code === 'security.maxDepthReached'));
+});
+
+test('(review 12) renderSummary never says "not on the trust list" when trust was not evaluated', async () => {
+  const { renderSummary } = await import('../dist/render.js');
+  const d = buildDigest(
+    { validation_state: 'Valid', active_manifest: 'm0', manifests: { m0: { signature_info: { common_name: 'S' } } }, validation_status: [{ code: 'signingCredential.untrusted' }] },
+    { trust: { evaluated: false, listSource: null, reason: 'offline' } },
+  );
+  const text = renderSummary(d);
+  assert.match(text, /Signer: S \(trust not evaluated\)/);
+  assert.doesNotMatch(text, /not on the trust list/);
 });

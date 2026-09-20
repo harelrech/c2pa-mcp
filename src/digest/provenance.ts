@@ -8,6 +8,7 @@
 import type { Reader as ManifestStore, Manifest, Ingredient, SignatureInfo } from '@contentauth/c2pa-types';
 import type { IngredientIssue, IssueEntry, NodeVerdict, ProvenanceEntry } from '../types.js';
 import { MAX_INGREDIENT_DEPTH, activeStatusOf, statusCodesToGraded } from './ingredients.js';
+import type { ChainIssues } from './ingredients.js';
 
 // Depth alone doesn't bound the tree: ingredients fan out per level. Cap the
 // total number of lineage nodes the walk will emit.
@@ -91,14 +92,14 @@ function ingredientVerdict(ing: Ingredient, fallback: NodeVerdict): NodeVerdict 
  * @param store the raw ManifestStore from `reader.json()`
  * @param rootVerdict the authoritative node verdict for the active asset (from the
  *   store-level validation_state), so the root never contradicts the overall result.
- * @param ingredientIssues problems already collected per failing manifest label
- *   (collectIngredientIssues); consulted for every non-root node so a failure
- *   that only exists in store-level deltas still paints the right node.
+ * @param chain problems already collected by collectIngredientIssues (or a bare
+ *   issue list); consulted for every non-root node so a failure that only
+ *   exists in store-level deltas still paints the right node.
  */
 export function buildProvenance(
   store: ManifestStore | null | undefined,
   rootVerdict: NodeVerdict,
-  ingredientIssues: IngredientIssue[] = [],
+  chain: ChainIssues | IngredientIssue[] = [],
 ): ProvenanceEntry[] {
   if (!store) return [];
   const manifests = (store.manifests || {}) as Record<string, Manifest>;
@@ -106,6 +107,8 @@ export function buildProvenance(
   const activeManifest = (activeLabel && manifests[activeLabel]) || undefined;
   if (!activeManifest) return [];
 
+  const ingredientIssues = Array.isArray(chain) ? chain : chain.issues;
+  const byIngredient = Array.isArray(chain) ? new WeakMap<object, IngredientIssue>() : chain.byIngredient;
   const issuesByLabel = new Map<string, IngredientIssue>();
   for (const issue of ingredientIssues) {
     if (issue.manifestLabel) issuesByLabel.set(issue.manifestLabel, issue);
@@ -130,7 +133,9 @@ export function buildProvenance(
     label: string | undefined,
     own: NodeVerdict,
   ): ProvenanceEntry => {
-    const collected = label ? issuesByLabel.get(label) : undefined;
+    // By manifest label first; an ingredient with no resolvable label is
+    // looked up by identity so its own failures still land on its node.
+    const collected = (label ? issuesByLabel.get(label) : undefined) ?? (ing ? byIngredient.get(ing) : undefined);
     const issues = collected?.codes ?? [];
     return {
       depth,

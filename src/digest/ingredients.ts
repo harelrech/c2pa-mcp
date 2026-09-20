@@ -18,7 +18,7 @@
 
 import type { Reader as ManifestStore, Manifest, Ingredient } from '@contentauth/c2pa-types';
 import type { IngredientIssue, IssueEntry } from '../types.js';
-import { classifyValidationCode, explainCode } from './validationCodes.js';
+import { C2PA_VALIDATION_CODES, classifyValidationCode, explainCode } from './validationCodes.js';
 
 // The C2PA spec requires recursive ingredient validation but sets no depth bound,
 // which is a DoS vector via deeply nested chains. Same cap as provenance.ts.
@@ -91,15 +91,34 @@ function toGradedCodes(source: unknown): GradedCode[] {
 }
 
 /**
- * Grade a flat status array OR a StatusCodes object. `success` is skipped: those
- * are passing checks by definition, and an unrecognised success code would
- * otherwise default to `warning` and paint a clean node amber.
+ * Grade a flat status array OR a StatusCodes object.
+ *
+ * For a StatusCodes object the engine has already sorted each code into a
+ * bucket, and the bucket bounds our table's grade:
+ *   - `informational` is capped at `warning`: c2pa-rs files some codes there
+ *     that our table grades `error` (e.g. an ingredient's `timeStamp.mismatch`
+ *     that did not affect its verdict). Treating them as errors painted a node
+ *     Invalid on a chain the engine considers clean.
+ *   - `failure` is NOT floored at `error` for known codes: c2pa-rs puts
+ *     `signingCredential.untrusted` in `failure` while still reporting the
+ *     manifest `Valid`, so "in failure" does not mean "invalid". Only a code
+ *     our table doesn't know is floored to `error` there — an unknown failure
+ *     must not fall through to the table's default `warning`.
+ *   - `success` is skipped: passing checks by definition, and an unrecognised
+ *     success code would otherwise default to `warning`.
+ * A flat v1/v2 array has no buckets, so the table is the only grade available.
  */
 export function statusCodesToGraded(source: unknown): GradedCode[] {
   if (!source || typeof source !== 'object') return [];
   if (Array.isArray(source)) return toGradedCodes(source);
   const sc = source as LooseRecord;
-  return [...toGradedCodes(sc.failure), ...toGradedCodes(sc.informational)];
+  const failures = toGradedCodes(sc.failure).map((c) =>
+    c.code in C2PA_VALIDATION_CODES ? c : { ...c, severity: 'error' as const },
+  );
+  const infos = toGradedCodes(sc.informational).map((c) =>
+    c.severity === 'error' ? { ...c, severity: 'warning' as const } : c,
+  );
+  return [...failures, ...infos];
 }
 
 const SEVERITY_RANK: Record<IssueEntry['severity'], number> = { info: 1, warning: 2, error: 3 };
@@ -108,6 +127,19 @@ interface Bucket {
   ingredientTitle: string | null;
   manifestLabel: string | null;
   codes: IssueEntry[];
+  /** The ingredient objects that fed this bucket, for label-less lookup. */
+  ingredients: Ingredient[];
+}
+
+export interface ChainIssues {
+  issues: IngredientIssue[];
+  depthExceeded: boolean;
+  /**
+   * Issue per ingredient OBJECT, for ingredients that have no resolvable
+   * `active_manifest` label and so can't be found via `manifestLabel`. Keyed
+   * by identity on the same store the provenance walk uses.
+   */
+  byIngredient: WeakMap<object, IngredientIssue>;
 }
 
 /**
@@ -119,24 +151,23 @@ interface Bucket {
  * manifest is identified by the label embedded in each failure's `url`, so
  * codes are grouped by that, falling back to the delta's first derivable label.
  */
-export function collectIngredientIssues(
-  store: ManifestStore | null | undefined,
-): { issues: IngredientIssue[]; depthExceeded: boolean } {
-  if (!store) return { issues: [], depthExceeded: false };
+export function collectIngredientIssues(store: ManifestStore | null | undefined): ChainIssues {
+  if (!store) return { issues: [], depthExceeded: false, byIngredient: new WeakMap() };
   const manifests = (store.manifests || {}) as Record<string, Manifest>;
   const activeLabel = store.active_manifest || undefined;
 
   const buckets = new Map<string, Bucket>();
   let depthExceeded = false;
 
-  const bucketFor = (label: string | undefined, path: string, title?: string | null): Bucket => {
+  const bucketFor = (label: string | undefined, path: string, title?: string | null, ing?: Ingredient): Bucket => {
     const key = label || path;
     let b = buckets.get(key);
     if (!b) {
-      b = { ingredientTitle: null, manifestLabel: label || null, codes: [] };
+      b = { ingredientTitle: null, manifestLabel: label || null, codes: [], ingredients: [] };
       buckets.set(key, b);
     }
     if (!b.ingredientTitle && title) b.ingredientTitle = title;
+    if (ing && !b.ingredients.includes(ing)) b.ingredients.push(ing);
     return b;
   };
 
@@ -185,16 +216,18 @@ export function collectIngredientIssues(
   const visited = new Set<string>();
   const walk = (manifest: Manifest | undefined, path: string, depth: number) => {
     if (!manifest) return;
+    const ingredients = Array.isArray(manifest.ingredients) ? manifest.ingredients : [];
+    // Only an actual cut-off counts: a manifest at the cap with nothing below
+    // it was fully evaluated.
     if (depth >= MAX_INGREDIENT_DEPTH) {
-      depthExceeded = true;
+      if (ingredients.length > 0) depthExceeded = true;
       return;
     }
-    const ingredients = Array.isArray(manifest.ingredients) ? manifest.ingredients : [];
     ingredients.forEach((ing: Ingredient, index) => {
       if (!ing || typeof ing !== 'object') return;
       const childPath = `${path}.ingredient.${index}`;
       const label = ing.active_manifest || undefined;
-      const bucket = bucketFor(label, childPath, ing.title);
+      const bucket = bucketFor(label, childPath, ing.title, ing);
       addCodes(bucket, statusCodesToGraded(ing.validation_status));
       // Ingredient V3: `validation_results` is the ValidationResults wrapper —
       // this node's own codes are under `.activeManifest`, and its nested
@@ -228,19 +261,32 @@ export function collectIngredientIssues(
   // object itself.
   addDeltas(deltasOf(store.validation_results), 'ingredientDelta');
 
+  // Pass 4: the store-level `validation_status` aggregate. c2pa-rs lists a
+  // nested manifest's code there too (its url names that manifest). Entries
+  // that belong to an ingredient are chain issues, not this file's own —
+  // verdict.ts keeps them out of Digest.issues for the same reason.
+  for (const c of statusCodesToGraded(store.validation_status)) {
+    const label = manifestLabelFromJumbfUri(c.url);
+    if (!label || label === activeLabel) continue;
+    addCodes(bucketFor(label, `manifest.${label}`, manifests[label]?.title), [c]);
+  }
+
   const issues: IngredientIssue[] = [];
+  const byIngredient = new WeakMap<object, IngredientIssue>();
   for (const b of buckets.values()) {
     if (!b.codes.length) continue;
     const worst = b.codes.reduce<'error' | 'warning'>(
       (w, c) => (SEVERITY_RANK[c.severity] > SEVERITY_RANK[w] ? (c.severity as 'error' | 'warning') : w),
       'warning',
     );
-    issues.push({
+    const issue: IngredientIssue = {
       ingredientTitle: b.ingredientTitle,
       manifestLabel: b.manifestLabel,
       codes: b.codes,
       worstSeverity: worst,
-    });
+    };
+    issues.push(issue);
+    for (const ing of b.ingredients) byIngredient.set(ing, issue);
   }
-  return { issues, depthExceeded };
+  return { issues, depthExceeded, byIngredient };
 }

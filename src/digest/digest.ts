@@ -76,7 +76,7 @@ export function buildDigest(store: ManifestStore, opts: BuildDigestOptions): Dig
     generator: extractGenerator(store),
     signer,
     aiGenerated: ai,
-    provenance: buildProvenance(store, verdictToNodeVerdict(verdict), chain.issues),
+    provenance: buildProvenance(store, verdictToNodeVerdict(verdict), chain),
     edits: extractEdits(store),
     watermarks: extractWatermarks(store),
     issues,

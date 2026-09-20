@@ -14,6 +14,7 @@ import type {
 } from '@contentauth/c2pa-types';
 import type { IngredientIssue, IssueEntry, NodeVerdict, SignerInfo, Verdict } from '../types.js';
 import { classifyValidationCode, explainCode } from './validationCodes.js';
+import { manifestLabelFromJumbfUri } from './ingredients.js';
 
 function activeManifest(store: ManifestStore): Manifest | undefined {
   const label = store.active_manifest || undefined;
@@ -40,12 +41,13 @@ export function hasUntrustedSigner(issues: IssueEntry[]): boolean {
 /**
  * Gather the ACTIVE manifest's status entries, deduped by code+url.
  *
- * `store.validation_status` is the engine's store-level aggregate (it may carry a
- * nested manifest's code when that code drove `validation_state` to Invalid) and
- * is deliberately not label-filtered: it is the engine's own top-level judgement,
- * the same thing CAI Verify renders. `ingredientDeltas` are NOT read here — a
- * failing ingredient must not appear as this file's own issue (C2PA 2.2 §15.11);
- * they are collected separately by collectIngredientIssues().
+ * `store.validation_status` is the engine's store-level AGGREGATE: it also lists
+ * a nested manifest's codes, each with a url naming that manifest. Those belong
+ * to the chain (collectIngredientIssues reads them) and are dropped here, with
+ * one exception — when the engine's own verdict is `Invalid` and the entry is
+ * an error, it is (part of) the reason for that verdict and stays, so the
+ * digest never says "invalid" with an empty issue list. `ingredientDeltas` are
+ * never read here (C2PA 2.2 §15.11).
  */
 function allStatuses(store: ManifestStore): ValidationStatus[] {
   const seen = new Set<string>();
@@ -65,7 +67,15 @@ function allStatuses(store: ManifestStore): ValidationStatus[] {
     }
   };
 
-  push(store.validation_status);
+  const activeLabel = store.active_manifest || undefined;
+  const engineInvalid = store.validation_state === 'Invalid';
+  const own = (store.validation_status || []).filter((s) => {
+    const label = manifestLabelFromJumbfUri(s?.url);
+    // No active label means nothing can be attributed away; keep everything.
+    if (!activeLabel || !label || label === activeLabel) return true;
+    return engineInvalid && classifyValidationCode(s.code).severity === 'error';
+  });
+  push(own);
   const results = store.validation_results;
   if (results?.activeManifest) {
     push(results.activeManifest.failure);

@@ -102,9 +102,9 @@ export interface TrustInfo {
   /** The trust-list URL(s) that actually loaded, when one was applied. */
   listSource: string | null;
   /**
-   * True when some, but not all, configured trust lists loaded. The verdict was
-   * evaluated against fewer anchors than configured, so a signer that only the
-   * missing list recognizes can read as untrusted. `reason` names what is missing.
+   * True when some, but not all, configured trust inputs (anchor lists,
+   * end-entity allow-list, EKU config) loaded. A signer that only the missing
+   * input recognizes can read as untrusted. `reason` names what is missing.
    */
   partial?: boolean;
   /**

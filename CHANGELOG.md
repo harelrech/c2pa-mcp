@@ -29,6 +29,21 @@ Aligns provenance-chain reporting with c2paviewer.com and C2PA 2.2 §15.11.
 - Info-severity codes never surface as chain or node issues.
 - `timeStamp.untrusted` is no longer described as "the signer is not on the
   C2PA trust list"; only `signingCredential.untrusted` triggers that sentence.
+- Store-level `validation_status` entries whose url names an ingredient's
+  manifest are routed to `ingredientIssues` instead of `issues` (they are the
+  engine's aggregate, not the file's own), except an error that drove
+  `validation_state` to `Invalid`, which stays so an invalid file never has an
+  empty issue list.
+- The engine's own buckets now bound the grade: codes under `informational`
+  are at most `warning`; an unknown code under `failure` is at least `error`
+  (known codes keep their table grade — c2pa-rs files
+  `signingCredential.untrusted` under `failure` on manifests it still calls
+  `Valid`).
+- An ingredient with no resolvable manifest label now carries its own issues
+  on its provenance node (previously `invalid` with `issues: []`).
+- `security.maxDepthReached` only fires when something was actually cut off.
+- Rendered signer line says "trust not evaluated" (never "not on the trust
+  list") when no trust list was applied.
 
 ### Trust
 - Trust is now evaluated against the same five inputs as c2paviewer.com:
@@ -38,7 +53,10 @@ Aligns provenance-chain reporting with c2paviewer.com and C2PA 2.2 §15.11.
   recognized via the allow-list (e.g. Fastly) read `valid_untrusted` here while
   the site showed them Trusted. New env overrides `C2PA_TRUST_ALLOWED_LIST_URL`
   and `C2PA_TRUST_CONFIG_URL` (empty string disables). The disk cache is now a
-  single `trust-bundle.json`; the old `trust-anchors.pem` is ignored.
+  single `trust-bundle.json`; the old `trust-anchors.pem` is ignored. A bundle
+  with any input missing is used for the current process (reported via
+  `trust.partial`) but never written to disk, so a transient outage no longer
+  pins the degraded state for a full TTL.
 - Opt-in live tests: `C2PA_LIVE_TRUST_TESTS=1 npm test`; the publish workflow runs them on every release.
 
 ### Dependencies

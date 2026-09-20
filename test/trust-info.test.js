@@ -32,3 +32,14 @@ test('single configured list loaded -> not partial', () => {
   assert.equal(info.partial, false);
   assert.equal(info.listSource, A);
 });
+
+import { isCompleteBundle } from '../dist/engine/trust.js';
+
+// (review 7) only a complete bundle may be persisted; a partial one must be
+// retried by the next process rather than locked in for a full TTL.
+test('isCompleteBundle is true only when every configured input loaded', () => {
+  assert.equal(isCompleteBundle([A, B], [A, B]), true);
+  assert.equal(isCompleteBundle([B, A], [A, B]), true);
+  assert.equal(isCompleteBundle([A], [A, B]), false);
+  assert.equal(isCompleteBundle([], [A]), false);
+});

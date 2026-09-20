@@ -36,12 +36,17 @@ export function renderSummary(digest: Digest, label?: string): string {
   if (digest.signer) {
     // Only call the signer "not on the trust list" when the engine said so about
     // the signer itself; an untrusted timestamp authority is a different cert.
+    // The engine emits signingCredential.untrusted whenever no anchor matched —
+    // including when we had no anchors to give it — so only call the signer
+    // "not on the trust list" when trust was actually evaluated.
     const signerFlagged = digest.issues.some((i) => i.code === UNTRUSTED_SIGNER_CODE);
     const trust = digest.signer.trusted
       ? 'on the C2PA trust list'
-      : signerFlagged
-        ? 'not on the trust list'
-        : 'trust not confirmed';
+      : !digest.trust.evaluated
+        ? 'trust not evaluated'
+        : signerFlagged
+          ? 'not on the trust list'
+          : 'trust not confirmed';
     lines.push(`Signer: ${digest.signer.name || 'undisclosed'} (${trust})`);
   }
 
