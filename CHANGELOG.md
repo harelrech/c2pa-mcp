@@ -39,7 +39,7 @@ Aligns provenance-chain reporting with c2paviewer.com and C2PA 2.2 §15.11.
   the site showed them Trusted. New env overrides `C2PA_TRUST_ALLOWED_LIST_URL`
   and `C2PA_TRUST_CONFIG_URL` (empty string disables). The disk cache is now a
   single `trust-bundle.json`; the old `trust-anchors.pem` is ignored.
-- Opt-in live tests: `C2PA_LIVE_TRUST_TESTS=1 npm test`.
+- Opt-in live tests: `C2PA_LIVE_TRUST_TESTS=1 npm test`; the publish workflow runs them on every release.
 
 ### Dependencies
 - `@contentauth/c2pa-node` 0.5.5 → 0.6.3 (pinned). 0.5.5 reported an active
