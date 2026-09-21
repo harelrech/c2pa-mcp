@@ -9,30 +9,68 @@
 //    verification still runs but the digest reports trust was not evaluated.
 //    We never silently fall back to a stale snapshot.
 
-import { mkdir, open, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, open, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { TrustInfo } from '../types.js';
 import { validateUrl, ssrfDispatcher } from '../net/safeFetch.js';
 import { requireEngine } from './engine.js';
 
-// Default trust anchors: the official C2PA Conformance Program list (going-forward
-// signers) PLUS the legacy CAI Interim Trust List. The ITL was frozen in Jan 2026,
-// but it is still the only list that recognizes pre-conformance signers — Adobe,
-// Leica, Truepic, Canon, Samsung, and most real-world content in circulation today.
-// Without it, mainstream signed content reads as valid-but-untrusted. Override or
-// extend with the comma-separated C2PA_TRUST_LIST_URL env var.
-const DEFAULT_TRUST_LIST_URLS = [
+// Trust inputs — the same five c2paviewer.com feeds its verifier
+// (c2pa-viewer/app/utils/trustAnchors.ts), so the MCP and the site agree on who
+// is "trusted". They come in two groups:
+//
+// Official C2PA Conformance Program (going-forward signers):
+//   - C2PA-TRUST-LIST.pem      CA anchors for claim signers
+//   - C2PA-TSA-TRUST-LIST.pem  CA anchors for Time-Stamp Authorities. c2pa-node
+//                              has no separate TSA slot, so it is folded into the
+//                              same anchors bundle, exactly as the site does. Note
+//                              the consequence: those CAs become acceptable
+//                              CLAIM-SIGNER anchors too. The EKU config below is
+//                              what keeps a timestamping cert from signing claims.
+//
+// CAI Interim Trust List (frozen Jan 2026, officially temporary, but still the
+// only thing that recognizes pre-conformance signers — Adobe, Leica, Truepic,
+// Canon, Samsung, Fastly, and most real-world content in circulation today):
+//   - anchors.pem              legacy CA anchors
+//   - allowed.sha256.txt       allow-list of specific END-ENTITY cert hashes; a
+//                              signer whose leaf is listed is trusted even when
+//                              nothing chains to an anchor (this is what makes
+//                              e.g. Fastly read Trusted)
+//   - store.cfg                accepted Extended Key Usage OIDs
+//
+// Without the interim group, mainstream signed content reads valid-but-untrusted.
+// When the interim list is retired, delete that group here and in README.md.
+const DEFAULT_ANCHOR_URLS = [
   'https://raw.githubusercontent.com/c2pa-org/conformance-public/main/trust-list/C2PA-TRUST-LIST.pem',
+  'https://raw.githubusercontent.com/c2pa-org/conformance-public/main/trust-list/C2PA-TSA-TRUST-LIST.pem',
   'https://verify.contentauthenticity.org/trust/anchors.pem',
 ];
+const DEFAULT_ALLOWED_LIST_URL = 'https://verify.contentauthenticity.org/trust/allowed.sha256.txt';
+const DEFAULT_TRUST_CONFIG_URL = 'https://verify.contentauthenticity.org/trust/store.cfg';
 
-const TRUST_LIST_URLS: string[] = (process.env.C2PA_TRUST_LIST_URL || '')
-  .split(',')
-  .map((s) => s.trim())
-  .filter(Boolean);
+const envList = (name: string): string[] =>
+  (process.env[name] || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
 
-const URLS = TRUST_LIST_URLS.length > 0 ? TRUST_LIST_URLS : DEFAULT_TRUST_LIST_URLS;
+// C2PA_TRUST_LIST_URL replaces the anchor set. C2PA_TRUST_ALLOWED_LIST_URL and
+// C2PA_TRUST_CONFIG_URL replace their single default; set either to the empty
+// string to disable that input (an unset var keeps the default).
+const ANCHOR_URLS = envList('C2PA_TRUST_LIST_URL');
+const URLS = ANCHOR_URLS.length > 0 ? ANCHOR_URLS : DEFAULT_ANCHOR_URLS;
+const ALLOWED_LIST_URL =
+  process.env.C2PA_TRUST_ALLOWED_LIST_URL === undefined
+    ? DEFAULT_ALLOWED_LIST_URL
+    : process.env.C2PA_TRUST_ALLOWED_LIST_URL.trim() || null;
+const TRUST_CONFIG_URL =
+  process.env.C2PA_TRUST_CONFIG_URL === undefined
+    ? DEFAULT_TRUST_CONFIG_URL
+    : process.env.C2PA_TRUST_CONFIG_URL.trim() || null;
+
+/** Every configured input, in a stable order, for cache binding and reporting. */
+const ALL_URLS: string[] = [...URLS, ...(ALLOWED_LIST_URL ? [ALLOWED_LIST_URL] : []), ...(TRUST_CONFIG_URL ? [TRUST_CONFIG_URL] : [])];
 
 const TTL_SECONDS = Number(process.env.C2PA_TRUST_TTL_SECONDS || 24 * 60 * 60);
 const FETCH_TIMEOUT_MS = Number(process.env.C2PA_TRUST_FETCH_TIMEOUT_MS || 15000);
@@ -46,8 +84,10 @@ const MAX_TRUST_BYTES = Number(process.env.C2PA_MAX_TRUST_BYTES || 10 * 1024 * 1
 // to `trusted`. Under the user's home, plus 0700 perms and an ownership check on
 // read, the cache cannot be planted by another local user.
 const CACHE_DIR = join(process.env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'c2pa-mcp');
-const CACHE_FILE = join(CACHE_DIR, 'trust-anchors.pem');
-const CACHE_META = join(CACHE_DIR, 'trust-anchors.meta.json');
+// One bundle file holds every input so they can never go out of step with each
+// other (a fresh anchors file next to a stale allow-list would be a silent
+// trust change). The v1 `trust-anchors.pem` cache is simply ignored.
+const CACHE_FILE = join(CACHE_DIR, 'trust-bundle.json');
 
 export interface TrustSettings {
   /** A settings JSON string for Reader.fromAsset, or undefined to verify without trust. */
@@ -55,16 +95,26 @@ export interface TrustSettings {
   info: TrustInfo;
 }
 
+/** The fetched trust inputs. Empty string / null means "not loaded". */
+interface TrustBundle {
+  pem: string;
+  allowedList: string | null;
+  trustConfig: string | null;
+  fetchedAtMs: number;
+  /** The subset of ALL_URLS whose fetch actually succeeded. */
+  loaded: string[];
+}
+
 // Process-lifetime memo so repeated verifications in one run don't re-read disk.
-// `loaded` is the subset of URLS whose fetch actually succeeded, so trust info
+// `loaded` is the subset of ALL_URLS whose fetch actually succeeded, so trust info
 // reports what was really applied rather than the full configured set.
-let memo: { pem: string; fetchedAtMs: number; loaded: string[] } | null = null;
+let memo: TrustBundle | null = null;
 
 function nowMs(): number {
   return Date.now();
 }
 
-async function readDiskCache(): Promise<{ pem: string; fetchedAtMs: number; loaded: string[] } | null> {
+async function readDiskCache(): Promise<TrustBundle | null> {
   let fh: Awaited<ReturnType<typeof open>> | undefined;
   try {
     fh = await open(CACHE_FILE, 'r');
@@ -76,17 +126,19 @@ async function readDiskCache(): Promise<{ pem: string; fetchedAtMs: number; load
       if (st.uid !== process.getuid()) return null;
       if ((st.mode & 0o022) !== 0) return null; // group/other writable
     }
-    const pem = await fh.readFile('utf8');
-    const metaRaw = await readFile(CACHE_META, 'utf8');
-    const meta = JSON.parse(metaRaw) as { fetchedAtMs?: number; urls?: string[]; loaded?: string[] };
-    if (!pem.trim() || typeof meta.fetchedAtMs !== 'number') return null;
-    // Bind the cache to the exact configured URL set: a cache built for a
-    // different trust-list config must not be reused.
-    if (!Array.isArray(meta.urls) || meta.urls.join('\n') !== URLS.join('\n')) return null;
-    // `loaded` records which URLs actually contributed anchors. Older caches
-    // without it fall back to the full configured set.
-    const loaded = Array.isArray(meta.loaded) ? meta.loaded : URLS;
-    return { pem, fetchedAtMs: meta.fetchedAtMs, loaded };
+    const raw = JSON.parse(await fh.readFile('utf8')) as Partial<TrustBundle> & { urls?: string[] };
+    if (typeof raw.pem !== 'string' || !raw.pem.trim() || typeof raw.fetchedAtMs !== 'number') return null;
+    // Bind the cache to the exact configured input set: a cache built for a
+    // different trust config must not be reused.
+    if (!Array.isArray(raw.urls) || raw.urls.join('\n') !== ALL_URLS.join('\n')) return null;
+    if (!Array.isArray(raw.loaded)) return null;
+    return {
+      pem: raw.pem,
+      allowedList: typeof raw.allowedList === 'string' ? raw.allowedList : null,
+      trustConfig: typeof raw.trustConfig === 'string' ? raw.trustConfig : null,
+      fetchedAtMs: raw.fetchedAtMs,
+      loaded: raw.loaded,
+    };
   } catch {
     return null;
   } finally {
@@ -94,14 +146,10 @@ async function readDiskCache(): Promise<{ pem: string; fetchedAtMs: number; load
   }
 }
 
-async function writeDiskCache(pem: string, fetchedAtMs: number, loaded: string[]): Promise<void> {
+async function writeDiskCache(bundle: TrustBundle): Promise<void> {
   try {
     await mkdir(CACHE_DIR, { recursive: true, mode: 0o700 });
-    await writeFile(CACHE_FILE, pem, { encoding: 'utf8', mode: 0o600 });
-    await writeFile(CACHE_META, JSON.stringify({ fetchedAtMs, urls: URLS, loaded }), {
-      encoding: 'utf8',
-      mode: 0o600,
-    });
+    await writeFile(CACHE_FILE, JSON.stringify({ ...bundle, urls: ALL_URLS }), { encoding: 'utf8', mode: 0o600 });
   } catch {
     // A non-writable cache dir is non-fatal; we just lose cross-process caching.
   }
@@ -111,7 +159,28 @@ function isFresh(fetchedAtMs: number): boolean {
   return nowMs() - fetchedAtMs < TTL_SECONDS * 1000;
 }
 
-async function fetchPem(rawUrl: string): Promise<string> {
+type TrustInputKind = 'anchors' | 'allowedList' | 'trustConfig';
+
+// Each input gets a shape check so a wrong/hijacked URL can't be silently fed
+// to the engine as trust material.
+function validateTrustText(kind: TrustInputKind, text: string): void {
+  if (kind === 'anchors' && !text.includes('BEGIN CERTIFICATE')) throw new Error('response is not PEM');
+  if (kind === 'allowedList') {
+    // One SHA-256 per line, base64 (44 chars, '=' padded) as CAI publishes it,
+    // or hex (64 chars); '#' comments allowed. Must contain at least one hash.
+    const ok = text
+      .split('\n')
+      .some((l) => /^(?:[A-Za-z0-9+/]{43}=|[0-9a-fA-F]{64})\s*$/.test(l.trim()));
+    if (!ok) throw new Error('response is not a sha256 allow-list');
+  }
+  if (kind === 'trustConfig') {
+    // Dotted OIDs per line; comments allowed.
+    const ok = text.split('\n').some((l) => /^\d+(\.\d+)+\s*$/.test(l.trim()));
+    if (!ok) throw new Error('response is not an EKU config');
+  }
+}
+
+async function fetchTrustText(rawUrl: string, kind: TrustInputKind): Promise<string> {
   // The trust-list URL is operator-supplied (env var). Apply the same SSRF
   // discipline as the URL tool: https + public host only, and re-validate every
   // redirect hop, so a misconfigured or hostile URL can't be bounced to an
@@ -145,7 +214,7 @@ async function fetchPem(rawUrl: string): Promise<string> {
       }
       const text = await res.text();
       if (text.length > MAX_TRUST_BYTES) throw new Error('trust list too large');
-      if (!text.includes('BEGIN CERTIFICATE')) throw new Error('response is not PEM');
+      validateTrustText(kind, text);
       return text;
     } finally {
       clearTimeout(timer);
@@ -154,22 +223,35 @@ async function fetchPem(rawUrl: string): Promise<string> {
 }
 
 /**
- * Fetch all configured trust-list URLs and concatenate the successful ones.
- * Returns the combined PEM plus `loaded` — the URLs that actually contributed —
- * so the caller can report partial evaluation honestly. Throws if none load.
+ * Fetch every configured input and keep the successful ones. Anchors are
+ * concatenated; the allow-list and EKU config are single documents. `loaded`
+ * records which URLs actually contributed so the caller can report partial
+ * evaluation honestly. Throws only if NO anchors loaded — an allow-list or
+ * config alone can't establish trust.
  */
-async function fetchAllPems(): Promise<{ pem: string; loaded: string[] }> {
-  const results = await Promise.allSettled(URLS.map(fetchPem));
+async function fetchBundle(): Promise<TrustBundle> {
+  const [anchorResults, allowedResult, configResult] = await Promise.all([
+    Promise.allSettled(URLS.map((u) => fetchTrustText(u, 'anchors'))),
+    ALLOWED_LIST_URL ? fetchTrustText(ALLOWED_LIST_URL, 'allowedList').then((v) => v, () => null) : Promise.resolve(null),
+    TRUST_CONFIG_URL ? fetchTrustText(TRUST_CONFIG_URL, 'trustConfig').then((v) => v, () => null) : Promise.resolve(null),
+  ]);
   const pems: string[] = [];
   const loaded: string[] = [];
-  results.forEach((r, i) => {
+  anchorResults.forEach((r, i) => {
     if (r.status === 'fulfilled') {
       pems.push(r.value);
       loaded.push(URLS[i]);
     }
   });
-  if (pems.length === 0) throw new Error('all trust-list fetches failed');
-  return { pem: pems.join('\n'), loaded };
+  if (pems.length === 0) throw new Error('all trust-anchor fetches failed');
+  if (ALLOWED_LIST_URL && allowedResult !== null) loaded.push(ALLOWED_LIST_URL);
+  if (TRUST_CONFIG_URL && configResult !== null) loaded.push(TRUST_CONFIG_URL);
+  return { pem: pems.join('\n'), allowedList: allowedResult, trustConfig: configResult, fetchedAtMs: nowMs(), loaded };
+}
+
+/** True when every configured input loaded. Only a complete bundle is persisted. */
+export function isCompleteBundle(loaded: string[], configured: string[]): boolean {
+  return configured.every((u) => loaded.includes(u));
 }
 
 /**
@@ -183,18 +265,25 @@ export function trustInfoFor(loaded: string[], configured: string[]): TrustInfo 
   const info: TrustInfo = { evaluated: true, listSource: loaded.join(', '), partial };
   if (partial) {
     const missing = configured.filter((u) => !loaded.includes(u));
-    info.reason = `Only ${loaded.length} of ${configured.length} configured trust lists loaded; missing: ${missing.join(', ')}.`;
+    info.reason = `Only ${loaded.length} of ${configured.length} configured trust inputs loaded; missing: ${missing.join(', ')}. Signers recognized only by a missing input will read as untrusted.`;
   }
   return info;
 }
 
-async function buildSettingsJson(pem: string): Promise<string> {
+async function buildSettingsJson(bundle: TrustBundle): Promise<string> {
   // settingsToJson converts the camelCase SettingsContext into the snake_case
-  // JSON the underlying c2pa-rs engine expects.
+  // JSON the underlying c2pa-rs engine expects. `trustConfig`/`allowedList`
+  // take the documents' CONTENTS (c2pa-rs reads them inline), despite the
+  // binding's JSDoc calling them paths.
   const engine = await requireEngine();
   return engine.settingsToJson(
     engine.mergeSettings(
-      engine.createTrustSettings({ verifyTrustList: true, trustAnchors: pem }),
+      engine.createTrustSettings({
+        verifyTrustList: true,
+        trustAnchors: bundle.pem,
+        allowedList: bundle.allowedList || undefined,
+        trustConfig: bundle.trustConfig || undefined,
+      }),
       engine.createVerifySettings({ verifyTrust: true, verifyAfterReading: true, ocspFetch: false }),
     ),
   );
@@ -208,23 +297,25 @@ async function buildSettingsJson(pem: string): Promise<string> {
 export async function getTrustSettings(): Promise<TrustSettings> {
   // 1. Memory memo within TTL.
   if (memo && isFresh(memo.fetchedAtMs)) {
-    return { settingsJson: await buildSettingsJson(memo.pem), info: trustInfoFor(memo.loaded, URLS) };
+    return { settingsJson: await buildSettingsJson(memo), info: trustInfoFor(memo.loaded, ALL_URLS) };
   }
 
   // 2. Disk cache within TTL.
   const disk = await readDiskCache();
   if (disk && isFresh(disk.fetchedAtMs)) {
     memo = disk;
-    return { settingsJson: await buildSettingsJson(disk.pem), info: trustInfoFor(disk.loaded, URLS) };
+    return { settingsJson: await buildSettingsJson(disk), info: trustInfoFor(disk.loaded, ALL_URLS) };
   }
 
   // 3. Live fetch.
   try {
-    const { pem, loaded } = await fetchAllPems();
-    const fetchedAtMs = nowMs();
-    memo = { pem, fetchedAtMs, loaded };
-    await writeDiskCache(pem, fetchedAtMs, loaded);
-    return { settingsJson: await buildSettingsJson(pem), info: trustInfoFor(loaded, URLS) };
+    const bundle = await fetchBundle();
+    memo = bundle;
+    // A partial bundle is used for this process (loudly, via trust.partial) but
+    // never written to disk: persisting it would lock every process on the
+    // machine into the degraded state for a full TTL after a transient outage.
+    if (isCompleteBundle(bundle.loaded, ALL_URLS)) await writeDiskCache(bundle);
+    return { settingsJson: await buildSettingsJson(bundle), info: trustInfoFor(bundle.loaded, ALL_URLS) };
   } catch (err) {
     // Degrade loudly: verify without trust, and say so.
     const reason = `Trust list could not be fetched (${(err as Error).message}); signer trust was not evaluated.`;
@@ -242,5 +333,5 @@ export function trustListStatus(): {
   const cached = !!(memo && isFresh(memo.fetchedAtMs));
   // `loaded` is only known once something has been fetched/cached this process;
   // null means "not yet evaluated", distinct from "evaluated, zero loaded".
-  return { urls: URLS, ttlSeconds: TTL_SECONDS, cached, loaded: cached ? memo!.loaded : null };
+  return { urls: ALL_URLS, ttlSeconds: TTL_SECONDS, cached, loaded: cached ? memo!.loaded : null };
 }

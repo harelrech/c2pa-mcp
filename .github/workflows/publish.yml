@@ -29,8 +29,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Test
+      # Live trust tests are opt-in (they hit the real C2PA/CAI endpoints) and
+      # deliberately run here: a release must prove all five trust inputs load
+      # and produce the expected `trusted` verdicts, which the hermetic default
+      # suite cannot check.
+      - name: Test (incl. live trust lists)
         run: npm test
+        env:
+          C2PA_LIVE_TRUST_TESTS: '1'
 
       # Fail early if the tag doesn't match package.json version, so the tag
       # and the published version can never drift apart.

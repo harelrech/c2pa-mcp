@@ -12,8 +12,9 @@ import type {
   ValidationStatus,
   SignatureInfo,
 } from '@contentauth/c2pa-types';
-import type { IssueEntry, NodeVerdict, SignerInfo, Verdict } from '../types.js';
+import type { IngredientIssue, IssueEntry, NodeVerdict, SignerInfo, Verdict } from '../types.js';
 import { classifyValidationCode, explainCode } from './validationCodes.js';
+import { manifestLabelFromJumbfUri } from './ingredients.js';
 
 function activeManifest(store: ManifestStore): Manifest | undefined {
   const label = store.active_manifest || undefined;
@@ -21,7 +22,33 @@ function activeManifest(store: ManifestStore): Manifest | undefined {
   return (label && manifests[label]) || undefined;
 }
 
-/** Gather every status entry across the store, deduped by code. */
+// Exact code match, deliberately not `code.includes('untrusted')`. TWO codes
+// contain that word and they mean different things:
+//
+//   signingCredential.untrusted → the SIGNER is not on the trust list  ← this
+//   timeStamp.untrusted         → the TIMESTAMP AUTHORITY is not trusted
+//
+// The substring form conflated them, so a file with a perfectly trusted signer
+// and an untrusted TSA was told "the signer is not on the C2PA trust list" —
+// the wrong sentence about the wrong certificate.
+export const UNTRUSTED_SIGNER_CODE = 'signingCredential.untrusted';
+
+/** True when the active manifest's own issues say the SIGNER is off the trust list. */
+export function hasUntrustedSigner(issues: IssueEntry[]): boolean {
+  return issues.some((i) => i.code === UNTRUSTED_SIGNER_CODE);
+}
+
+/**
+ * Gather the ACTIVE manifest's status entries, deduped by code+url.
+ *
+ * `store.validation_status` is the engine's store-level AGGREGATE: it also lists
+ * a nested manifest's codes, each with a url naming that manifest. Those belong
+ * to the chain (collectIngredientIssues reads them) and are dropped here, with
+ * one exception — when the engine's own verdict is `Invalid` and the entry is
+ * an error, it is (part of) the reason for that verdict and stays, so the
+ * digest never says "invalid" with an empty issue list. `ingredientDeltas` are
+ * never read here (C2PA 2.2 §15.11).
+ */
 function allStatuses(store: ManifestStore): ValidationStatus[] {
   const seen = new Set<string>();
   const out: ValidationStatus[] = [];
@@ -40,17 +67,20 @@ function allStatuses(store: ManifestStore): ValidationStatus[] {
     }
   };
 
-  push(store.validation_status);
+  const activeLabel = store.active_manifest || undefined;
+  const engineInvalid = store.validation_state === 'Invalid';
+  const own = (store.validation_status || []).filter((s) => {
+    const label = manifestLabelFromJumbfUri(s?.url);
+    // No active label means nothing can be attributed away; keep everything.
+    if (!activeLabel || !label || label === activeLabel) return true;
+    return engineInvalid && classifyValidationCode(s.code).severity === 'error';
+  });
+  push(own);
   const results = store.validation_results;
   if (results?.activeManifest) {
     push(results.activeManifest.failure);
     push(results.activeManifest.informational);
     push(results.activeManifest.success);
-  }
-  for (const delta of results?.ingredientDeltas || []) {
-    push(delta?.validationDeltas?.failure);
-    push(delta?.validationDeltas?.informational);
-    push(delta?.validationDeltas?.success);
   }
   return out;
 }
@@ -125,12 +155,29 @@ export function extractSigner(store: ManifestStore, trusted: boolean): SignerInf
   };
 }
 
+/**
+ * Sentence appended to the summary when an earlier version in the chain failed.
+ * Warnings (e.g. an ingredient signed off the trust list) are left to the
+ * structured list; only hard failures earn a mention in the one-liner.
+ */
+export function chainSummarySuffix(ingredientIssues: IngredientIssue[]): string {
+  const failed = ingredientIssues.filter((i) => i.worstSeverity === 'error').length;
+  if (!failed) return '';
+  const noun = failed === 1 ? 'earlier version' : 'earlier versions';
+  return ` ${failed} ${noun} in its provenance chain failed validation; this file's own signature is unaffected.`;
+}
+
 /** One-sentence, plain-language summary of the verdict. */
 export function buildSummary(
   verdict: Verdict,
   signer: SignerInfo | null,
   isAI: boolean,
   aiTools: string[],
+  // Whether the engine flagged the SIGNER itself (signingCredential.untrusted).
+  // `validation_state: 'Valid'` also results from an untrusted timestamp
+  // authority with a perfectly trusted signer; that case must not be described
+  // as a signer problem. Defaults to true for the common case.
+  signerUntrusted = true,
 ): string {
   const who = signer?.name ? ` (${signer.name})` : '';
   const ai =
@@ -142,6 +189,9 @@ export function buildSummary(
     case 'trusted':
       return `Content Credentials are valid and the signer${who} is on the C2PA trust list.${ai}`;
     case 'valid_untrusted':
+      if (!signerUntrusted) {
+        return `Content Credentials are cryptographically valid${signer?.name ? `, signed by ${signer.name}` : ''}, but a certificate in the signature chain (such as the timestamp authority) is not on the C2PA trust list, so the file does not reach Trusted.${ai}`;
+      }
       return `Content Credentials are cryptographically valid, but the signer${who} is not on the C2PA trust list, so the signer's identity is unverified.${ai}`;
     case 'valid_trust_unknown':
       return `Content Credentials are cryptographically valid${signer?.name ? `, signed by ${signer.name}` : ''}, but the trust list could not be checked, so signer trust is unconfirmed.${ai}`;
