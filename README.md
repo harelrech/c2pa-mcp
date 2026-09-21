@@ -27,7 +27,7 @@ No global install needed. Add it to your MCP client config and it runs via `npx`
 - **Claude Code**: `claude mcp add c2pa -- npx -y @c2paviewer/c2pa-mcp`
 - **Cursor / others**: add the same `mcpServers` entry to the client's MCP config.
 
-Requires Node.js 18+.
+Requires Node.js 22+ (the `@contentauth/c2pa-node` engine requires it).
 
 > **First run:** the underlying engine (`@contentauth/c2pa-node`) downloads a ~18MB native binary on first install. On a slow connection this can outlast an MCP client's startup timeout — if the very first launch seems to hang, let the download finish and relaunch; subsequent runs are instant.
 

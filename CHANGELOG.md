@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.2.1 — 2026-09-21
+- `engines.node` corrected to `>=22` (required by `@contentauth/c2pa-node` 0.6.3); README said 18+. No code change.
+
 ## 0.2.0 — 2026-09-20
 
 Aligns provenance-chain reporting with c2paviewer.com and C2PA 2.2 §15.11.
